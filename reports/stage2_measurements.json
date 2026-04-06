@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-04-06 23:03:02",
+  "phrase_set": {
+    "cases_total": 10,
+    "accuracy_percent": 100.0,
+    "summary": {
+      "count": 10,
+      "min_ms": 0.064,
+      "mean_ms": 3.692,
+      "p95_ms": 7.823,
+      "max_ms": 8.92,
+      "cpu_load_percent": 84.4,
+      "peak_memory_kib": 12.121
+    },
+    "mismatches": []
+  },
+  "synthetic_response_pipeline": {
+    "count": 200,
+    "min_ms": 0.012,
+    "mean_ms": 0.014,
+    "p95_ms": 0.016,
+    "max_ms": 0.035,
+    "cpu_load_percent": 0.0,
+    "peak_memory_kib": 6.309
+  },
+  "tts_runtime": {
+    "status": "skipped",
+    "reason": "RHVoice binary not found"
+  },
+  "stt_runtime": {
+    "status": "not_requested"
+  }
+}

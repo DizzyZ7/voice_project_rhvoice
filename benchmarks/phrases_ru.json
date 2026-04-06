@@ -1,0 +1,42 @@
+[
+  {
+    "text": "включи свет",
+    "expected_command": "turn_on_light"
+  },
+  {
+    "text": "пожалуйста включи свет в цехе",
+    "expected_command": "turn_on_light"
+  },
+  {
+    "text": "выключи свет",
+    "expected_command": "turn_off_light"
+  },
+  {
+    "text": "нужно выключить свет срочно",
+    "expected_command": "turn_off_light"
+  },
+  {
+    "text": "какая температура",
+    "expected_command": "get_temperature"
+  },
+  {
+    "text": "сколько градусов в помещении",
+    "expected_command": "get_temperature"
+  },
+  {
+    "text": "зажги свет",
+    "expected_command": "turn_on_light"
+  },
+  {
+    "text": "потуши свет",
+    "expected_command": "turn_off_light"
+  },
+  {
+    "text": "открой ворота",
+    "expected_command": null
+  },
+  {
+    "text": "поставь музыку",
+    "expected_command": null
+  }
+]

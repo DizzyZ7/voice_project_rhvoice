@@ -1,0 +1,8 @@
+fastapi==0.115.12
+uvicorn==0.34.3
+prometheus-client==0.22.1
+requests==2.32.3
+paho-mqtt==2.1.0
+python-multipart==0.0.20
+vosk==0.3.45
+sounddevice==0.5.2

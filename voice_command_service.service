@@ -1,0 +1,16 @@
+[Unit]
+Description=Offline Voice Command Service (Vosk + RHVoice)
+After=network.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/voice_project_rhvoice
+ExecStart=/usr/bin/python3 /home/pi/voice_project_rhvoice/voice_command_service.py
+Restart=on-failure
+RestartSec=2
+User=pi
+Environment=VOSK_MODEL_PATH=/home/pi/models/vosk-model-small-ru-0.22
+Environment=RHVOICE_BIN=RHVoice-test
+
+[Install]
+WantedBy=multi-user.target

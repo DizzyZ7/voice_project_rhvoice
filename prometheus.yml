@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  # Scrape the STT service metrics
+  - job_name: 'stt-service'
+    metrics_path: '/'
+    static_configs:
+      - targets: ['stt-service:9101']
+
+  # Scrape the TTS service metrics
+  - job_name: 'tts-service'
+    metrics_path: '/'
+    static_configs:
+      - targets: ['tts-service:9102']
+
+  # Scrape the orchestrator service metrics
+  - job_name: 'orchestrator'
+    metrics_path: '/'
+    static_configs:
+      - targets: ['orchestrator:9103']

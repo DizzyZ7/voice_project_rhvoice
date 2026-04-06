@@ -1,0 +1,106 @@
+version: "3.8"
+
+# Compose file to run the voice command system as a set of
+# independent microservices.  This configuration starts
+# three Python services (STT, TTS and orchestrator), a Mosquitto
+# MQTT broker, Prometheus for metrics collection and Grafana for
+# visualising those metrics.  Each Python service exposes its own
+# Prometheus metrics endpoint on ports 9101–9103 and serves a
+# REST API via FastAPI.
+
+services:
+  stt-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: voice_stt_service:latest
+    container_name: stt_service
+    environment:
+      - VOSK_MODEL_PATH=/models/vosk-model-small-ru-0.22
+      - VOICE_API_TOKEN=${VOICE_API_TOKEN:-change-me-in-prod}
+      - MAX_AUDIO_BYTES=2097152
+    volumes:
+      - ./models/vosk-model-small-ru-0.22:/models/vosk-model-small-ru-0.22:ro
+    command: uvicorn stt_service:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"   # HTTP API
+      - "9101:9101"   # Prometheus metrics
+    depends_on:
+      - mqtt-broker
+
+  tts-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: voice_tts_service:latest
+    container_name: tts_service
+    environment:
+      - RHVOICE_BIN=RHVoice-test
+      - TTS_OUTPUT_DIR=/tmp/tts-output
+      - VOICE_API_TOKEN=${VOICE_API_TOKEN:-change-me-in-prod}
+      - MAX_TTS_TEXT_LENGTH=400
+    command: uvicorn tts_service:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"   # HTTP API
+      - "9102:9102"   # Prometheus metrics
+    depends_on:
+      - mqtt-broker
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: voice_orchestrator_service:latest
+    container_name: orchestrator_service
+    environment:
+      - STT_URL=http://stt-service:8000/stt/recognize
+      - TTS_URL=http://tts-service:8001/tts/generate
+      - MQTT_HOST=mqtt-broker
+      - MQTT_PORT=1883
+      - VOICE_API_TOKEN=${VOICE_API_TOKEN:-change-me-in-prod}
+      - MAX_AUDIO_BYTES=2097152
+      - COMMAND_CONFIDENCE_THRESHOLD=0.74
+    command: uvicorn orchestrator_service:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"   # HTTP API
+      - "9103:9103"   # Prometheus metrics
+    depends_on:
+      - stt-service
+      - tts-service
+      - mqtt-broker
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: mqtt_broker
+    ports:
+      - "1883:1883"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - stt-service
+      - tts-service
+      - orchestrator
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+  grafana-data:
