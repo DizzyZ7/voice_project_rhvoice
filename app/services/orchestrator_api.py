@@ -138,13 +138,19 @@ def process_audio(
         headers = {"Authorization": f"Bearer {VOICE_API_TOKEN}"}
         stt_response = http_client.post(STT_URL, files=files, timeout=UPSTREAM_TIMEOUT_SECONDS, headers=headers)
         stt_response.raise_for_status()
+    except HTTPException:
+        raise
     except Exception as exc:
         ORC_ERRORS_TOTAL.inc()
         raise HTTPException(status_code=502, detail=f"STT service error: {exc}")
     finally:
         ORC_STT_LATENCY_SECONDS.observe(time.perf_counter() - stt_start)
 
-    stt_json = stt_response.json()
+    try:
+        stt_json = stt_response.json()
+    except ValueError as exc:
+        ORC_ERRORS_TOTAL.inc()
+        raise HTTPException(status_code=502, detail=f"STT service returned invalid JSON: {exc}")
     recognised_text: str = stt_json.get("text", "").strip().lower()
     spec, confidence = resolve_command_with_score(recognised_text)
     if spec and confidence >= COMMAND_CONFIDENCE_THRESHOLD:

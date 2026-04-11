@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import queue
+import tempfile
 import types
 from pathlib import Path
 from unittest import mock
@@ -164,3 +165,73 @@ def test_security_helpers():
     assert limiter.allow("client-a")
     assert limiter.allow("client-a")
     assert not limiter.allow("client-a")
+
+
+def test_stt_oversized_upload_cleans_temp_file():
+    upload = types.SimpleNamespace(file=io.BytesIO(b"x" * 16))
+    original_recognizer = stt_api.recognizer
+    original_limit = stt_api.MAX_AUDIO_BYTES
+    real_named_tempfile = tempfile.NamedTemporaryFile
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        def named_tempfile_in_dir(*args, **kwargs):
+            kwargs["delete"] = False
+            kwargs["suffix"] = ".wav"
+            kwargs["dir"] = temp_dir
+            return real_named_tempfile(*args, **kwargs)
+
+        try:
+            stt_api.recognizer = mock.Mock()
+            stt_api.MAX_AUDIO_BYTES = 4
+            with mock.patch("app.services.stt_api.tempfile.NamedTemporaryFile", side_effect=named_tempfile_in_dir):
+                try:
+                    stt_api.recognise_audio(upload)
+                except HTTPException as exc:
+                    assert exc.status_code == 413
+                else:
+                    raise AssertionError("Oversized upload must be rejected")
+            assert list(Path(temp_dir).iterdir()) == []
+        finally:
+            stt_api.recognizer = original_recognizer
+            stt_api.MAX_AUDIO_BYTES = original_limit
+
+
+def test_orchestrator_returns_413_for_oversized_stream():
+    upload = types.SimpleNamespace(filename="sample.wav", file=io.BytesIO(b"abcdefghi"), content_type="audio/wav")
+    original_limit = orchestrator_api.MAX_AUDIO_BYTES
+
+    def post_side_effect(*args, **kwargs):
+        stream = kwargs["files"]["file"][1]
+        stream.read()
+        raise AssertionError("Expected payload limiter to stop oversized upload")
+
+    try:
+        orchestrator_api.MAX_AUDIO_BYTES = 4
+        with mock.patch("app.services.orchestrator_api.http_client.post", side_effect=post_side_effect):
+            try:
+                orchestrator_api.process_audio(upload)
+            except HTTPException as exc:
+                assert exc.status_code == 413
+            else:
+                raise AssertionError("Oversized upload must return HTTP 413")
+    finally:
+        orchestrator_api.MAX_AUDIO_BYTES = original_limit
+
+
+def test_orchestrator_invalid_stt_json_returns_502():
+    class InvalidJSONResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("malformed JSON")
+
+    upload = types.SimpleNamespace(filename="sample.wav", file=io.BytesIO(b"wav-data"), content_type="audio/wav")
+    with mock.patch("app.services.orchestrator_api.http_client.post", return_value=InvalidJSONResponse()):
+        try:
+            orchestrator_api.process_audio(upload)
+        except HTTPException as exc:
+            assert exc.status_code == 502
+            assert "invalid JSON" in exc.detail
+        else:
+            raise AssertionError("Invalid STT JSON must return HTTP 502")
