@@ -59,27 +59,35 @@ def recognise_audio(
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     start_time = time.perf_counter()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        temp_path = tmp.name
-        copied = 0
-        while True:
-            chunk = file.file.read(64 * 1024)
-            if not chunk:
-                break
-            copied += len(chunk)
-            if copied > MAX_AUDIO_BYTES:
-                STT_ERRORS_TOTAL.inc()
-                raise HTTPException(status_code=413, detail="Audio file is too large")
-            tmp.write(chunk)
+    temp_path: str | None = None
     try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            temp_path = tmp.name
+            copied = 0
+            while True:
+                chunk = file.file.read(64 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > MAX_AUDIO_BYTES:
+                    STT_ERRORS_TOTAL.inc()
+                    raise HTTPException(status_code=413, detail="Audio file is too large")
+                tmp.write(chunk)
+
         result: STTResult = recognizer.transcribe_from_wav(temp_path)
         if not result.success:
             STT_ERRORS_TOTAL.inc()
             raise HTTPException(status_code=400, detail=result.error or "STT failed")
         return {"text": result.text, "success": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        STT_ERRORS_TOTAL.inc()
+        raise HTTPException(status_code=500, detail=str(exc))
     finally:
         STT_LATENCY_SECONDS.observe(time.perf_counter() - start_time)
-        try:
-            Path(temp_path).unlink()
-        except Exception:
-            pass
+        if temp_path:
+            try:
+                Path(temp_path).unlink()
+            except Exception:
+                pass
