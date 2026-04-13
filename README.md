@@ -49,6 +49,20 @@
    export RHVOICE_BIN=RHVoice-test  # или rhvoice.test
    export VOICE_API_TOKEN=change-me-in-prod
    ```
+   Для Raspberry Pi 4 / Debian 11 (`aarch64`), если пакеты RHVoice не ставятся, используйте инструкцию по сборке из исходников: `docs/rhvoice_build_debian11_arm64.md`.
+   На Windows можно использовать установленный RHVoice SAPI голос (без `RHVoice-test` в `PATH`), задав:
+   ```powershell
+   $env:VOSK_MODEL_PATH="C:\path\to\vosk-model-small-ru-0.22"
+   $env:RHVOICE_WINDOWS_VOICE="Anna"
+   ```
+   Либо запустить подготовительный скрипт:
+   ```powershell
+   .\scripts\setup_windows_runtime.ps1
+   ```
+   Запуск сервиса в Windows (с автонастройкой окружения):
+   ```powershell
+   .\scripts\run_voice_service_windows.ps1
+   ```
 3. Запустите сервис:
    ```bash
    python3 voice_command_service.py

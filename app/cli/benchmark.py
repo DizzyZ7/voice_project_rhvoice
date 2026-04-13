@@ -125,11 +125,10 @@ def benchmark_phrase_set(cases: list[PhraseCase]) -> dict[str, object]:
 
 
 def benchmark_tts(messages: list[str], output_dir: Path) -> dict[str, object]:
-    diagnostics = run_diagnostics()
-    if not diagnostics.rhvoice_binary:
-        return {"status": "skipped", "reason": "RHVoice binary not found"}
-
-    engine = RHVoiceTTS(binary=diagnostics.rhvoice_binary)
+    try:
+        engine = RHVoiceTTS()
+    except (FileNotFoundError, RuntimeError) as exc:
+        return {"status": "skipped", "reason": str(exc)}
     target_dir = output_dir / "tts"
     target_dir.mkdir(parents=True, exist_ok=True)
     latencies_ms: list[float] = []

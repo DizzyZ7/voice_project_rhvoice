@@ -67,9 +67,11 @@ def main() -> None:
 
     diagnostics = run_diagnostics(os.environ.get("VOSK_MODEL_PATH", str(BASE_DIR / "vosk-model-ru")))
     logger.info(
-        "Диагностика: model=%s rhvoice=%s sounddevice=%s",
+        "Диагностика: model=%s rhvoice_available=%s rhvoice_backend=%s rhvoice_target=%s sounddevice=%s",
         diagnostics.vosk_model_exists,
-        diagnostics.rhvoice_binary,
+        diagnostics.rhvoice_available,
+        diagnostics.rhvoice_backend,
+        diagnostics.rhvoice_target,
         diagnostics.sounddevice_available,
     )
 
