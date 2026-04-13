@@ -68,7 +68,7 @@ class VoiceCommandGUI:
         diag = run_diagnostics()
         msg = (
             f"Vosk model: {'OK' if diag.vosk_model_exists else 'НЕТ'} | "
-            f"RHVoice: {diag.rhvoice_binary or 'не найден'} | "
+            f"RHVoice: {(diag.rhvoice_backend + ':' + (diag.rhvoice_target or '-')) if diag.rhvoice_available else 'не найден'} | "
             f"sounddevice: {'OK' if diag.sounddevice_available else 'не установлен'}"
         )
         self.diag_var.set(msg)

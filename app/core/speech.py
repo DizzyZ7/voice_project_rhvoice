@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import shutil
+import base64
 import subprocess
 import tempfile
 import threading
@@ -29,6 +30,7 @@ LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_VOSK_MODEL_PATH = os.environ.get("VOSK_MODEL_PATH", str(BASE_DIR / "vosk-model-ru"))
 DEFAULT_RHVOICE_BIN = os.environ.get("RHVOICE_BIN")
+DEFAULT_WINDOWS_VOICE = os.environ.get("RHVOICE_WINDOWS_VOICE")
 
 
 @dataclass
@@ -42,6 +44,9 @@ class STTResult:
 class Diagnostics:
     vosk_model_exists: bool
     rhvoice_binary: Optional[str]
+    rhvoice_backend: Optional[str]
+    rhvoice_target: Optional[str]
+    rhvoice_available: bool
     sounddevice_available: bool
 
 
@@ -66,11 +71,24 @@ class RHVoiceTTS:
     def __init__(self, binary: Optional[str] = None, logger: Optional[logging.Logger] = None):
         self.logger = logger or setup_logger("tts", "tts.log")
         self.binary = binary or self._discover_binary()
-        if not self.binary:
-            raise FileNotFoundError(
-                "Не найден RHVoice CLI. Установите RHVoice и укажите RHVOICE_BIN, например RHVoice-test или rhvoice.test."
-            )
-        self.logger.info("Используется RHVoice бинарник: %s", self.binary)
+        self.backend = "rhvoice_cli"
+        self.windows_voice: Optional[str] = None
+
+        if self.binary:
+            self.logger.info("Используется RHVoice бинарник: %s", self.binary)
+            return
+
+        if os.name == "nt":
+            self.windows_voice = self._discover_windows_voice()
+            if self.windows_voice:
+                self.backend = "windows_sapi"
+                self.logger.info("RHVoice CLI не найден, используется Windows SAPI голос: %s", self.windows_voice)
+                return
+
+        raise FileNotFoundError(
+            "Не найден RHVoice CLI (RHVoice-test/rhvoice.test) и не удалось инициализировать Windows SAPI голос. "
+            "Установите RHVoice и укажите RHVOICE_BIN или RHVOICE_WINDOWS_VOICE."
+        )
 
     @staticmethod
     def _discover_binary() -> Optional[str]:
@@ -86,11 +104,85 @@ class RHVoiceTTS:
                 return candidate
         return None
 
+    @staticmethod
+    def _run_powershell(script: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    @classmethod
+    def _list_windows_voices(cls) -> list[str]:
+        script = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            "$s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }; "
+            "$s.Dispose()"
+        )
+        result = cls._run_powershell(script)
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    @classmethod
+    def _discover_windows_voice(cls) -> Optional[str]:
+        try:
+            voices = cls._list_windows_voices()
+        except Exception:
+            return None
+
+        if DEFAULT_WINDOWS_VOICE and DEFAULT_WINDOWS_VOICE in voices:
+            return DEFAULT_WINDOWS_VOICE
+
+        for voice in voices:
+            if not voice.lower().startswith("microsoft"):
+                return voice
+        return voices[0] if voices else None
+
+    def _sapi_speak(self, text: str, output_path: Optional[Path] = None) -> None:
+        if not self.windows_voice:
+            raise RuntimeError("Windows SAPI голос не инициализирован")
+
+        text_b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        voice_b64 = base64.b64encode(self.windows_voice.encode("utf-8")).decode("ascii")
+        output_b64 = base64.b64encode(str(output_path).encode("utf-8")).decode("ascii") if output_path else ""
+
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "Add-Type -AssemblyName System.Speech;"
+            f"$txt=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{text_b64}'));"
+            f"$voice=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{voice_b64}'));"
+            "$out='';"
+            + (
+                f"$out=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{output_b64}'));"
+                if output_b64
+                else ""
+            )
+            + "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+            "if($voice){$s.SelectVoice($voice)};"
+            "if($out){$s.SetOutputToWaveFile($out)}else{$s.SetOutputToDefaultAudioDevice()};"
+            "$s.Speak($txt);"
+            "$s.Dispose();"
+        )
+        self._run_powershell(script)
+
     def speak(self, text: str) -> None:
         text = text.strip()
         if not text:
             return
         self.logger.info("TTS запрос: %s", text)
+
+        if self.backend == "windows_sapi":
+            self._sapi_speak(text)
+            return
 
         if Path(self.binary).name in {"RHVoice-test", "rhvoice.test"}:
             result = subprocess.run([self.binary], input=text, text=True, capture_output=True, check=True)
@@ -118,6 +210,11 @@ class RHVoiceTTS:
         text = text.strip()
         if not text:
             raise ValueError("Пустой текст для синтеза")
+
+        if self.backend == "windows_sapi":
+            self._sapi_speak(text, output_path=output)
+            self.logger.info("Windows SAPI сохранил WAV: %s", output)
+            return output
 
         if Path(self.binary).name in {"RHVoice-test", "rhvoice.test"}:
             subprocess.run([self.binary, "-o", str(output)], input=text, text=True, check=True, capture_output=True)
@@ -214,8 +311,26 @@ class VoskRecognizer:
 
 def run_diagnostics(model_path: str = DEFAULT_VOSK_MODEL_PATH) -> Diagnostics:
     rhvoice_binary = RHVoiceTTS._discover_binary()
+    rhvoice_backend: Optional[str] = None
+    rhvoice_target: Optional[str] = None
+    rhvoice_available = False
+
+    if rhvoice_binary:
+        rhvoice_backend = "rhvoice_cli"
+        rhvoice_target = rhvoice_binary
+        rhvoice_available = True
+    elif os.name == "nt":
+        windows_voice = RHVoiceTTS._discover_windows_voice()
+        if windows_voice:
+            rhvoice_backend = "windows_sapi"
+            rhvoice_target = windows_voice
+            rhvoice_available = True
+
     return Diagnostics(
         vosk_model_exists=os.path.isdir(model_path),
         rhvoice_binary=rhvoice_binary,
+        rhvoice_backend=rhvoice_backend,
+        rhvoice_target=rhvoice_target,
+        rhvoice_available=rhvoice_available,
         sounddevice_available=sd is not None and vosk is not None,
     )

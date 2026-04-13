@@ -6,6 +6,11 @@ __pycache__/
 
 logs/
 tmp-tts-output/
+reports/tts/
+third_party/downloads/
+third_party/rhvoice_nvda/
+models/vosk-model-small-ru-0.22/
+models/vosk-model-small-ru-0.22.zip
 
 .DS_Store
 Thumbs.db
