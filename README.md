@@ -174,6 +174,14 @@ python -m pytest -q
 - `app/cli/benchmark.py` - CLI для воспроизводимых замеров;
 - `reports/stage2_measurements.json` - файл с результатами измерений.
 
+Кратко о доработках в последнем обновлении:
+
+- Добавлена отдельная инструкция сборки RHVoice из исходников для Linux (Debian 11 `aarch64`, Raspberry Pi 4): `docs/rhvoice_build_debian11_arm64.md`.
+- Добавлен скрипт автоматической установки RHVoice под Linux: `scripts/install_rhvoice_linux_aarch64.sh`.
+- Добавлен нормальный runtime fallback для Windows: если `RHVoice-test` не найден в `PATH`, TTS работает через Windows SAPI (`RHVOICE_WINDOWS_VOICE`, например `Anna`).
+- Добавлены вспомогательные Windows-скрипты для быстрого старта: `scripts/setup_windows_runtime.ps1` и `scripts/run_voice_service_windows.ps1`.
+- Улучшен `app/cli/benchmark.py`: TTS-бенчмарк больше не пропускается на Windows при отсутствии `RHVoice-test`, если доступен Windows SAPI голос.
+
 Запуск измерений:
 
 ```bash
