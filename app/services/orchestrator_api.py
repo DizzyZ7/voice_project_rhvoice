@@ -44,6 +44,8 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ORC_DB_PATH = Path(os.environ.get("ORC_DB_PATH", str(BASE_DIR / "data" / "orchestrator.db"))).resolve()
 ORC_IDEMPOTENCY_TTL_SECONDS = int(os.environ.get("ORC_IDEMPOTENCY_TTL_SECONDS", "3600"))
 INTEGRATION_STRICT = os.environ.get("INTEGRATION_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}
+ORC_DISPATCH_FAIL_OPEN = os.environ.get("ORC_DISPATCH_FAIL_OPEN", "1").strip().lower() in {"1", "true", "yes", "on"}
+logger = logging.getLogger("orchestrator")
 
 ORC_REQUESTS_TOTAL = Counter("orc_requests_total", "Total /process requests")
 ORC_ERRORS_TOTAL = Counter("orc_errors_total", "Total orchestrator errors")
@@ -393,7 +395,17 @@ def publish_command(topic: str, payload: str | None = None) -> None:
 
 def dispatch_command(topic: str, payload: str | None = None) -> None:
     if COMMAND_TRANSPORT == "mqtt":
-        publish_command(topic, payload)
+        try:
+            publish_command(topic, payload)
+        except Exception as exc:
+            if INTEGRATION_STRICT or not ORC_DISPATCH_FAIL_OPEN:
+                raise
+            logger.warning(
+                "MQTT dispatch failed, using local fallback: topic=%s error=%s",
+                topic,
+                exc,
+            )
+            LOCAL_COMMAND_EVENTS.append({"topic": topic, "payload": payload or "1"})
         return
     if COMMAND_TRANSPORT == "local":
         LOCAL_COMMAND_EVENTS.append({"topic": topic, "payload": payload or "1"})

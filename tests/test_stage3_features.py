@@ -56,6 +56,27 @@ def test_orchestrator_local_transport_dispatch():
         orchestrator_api.COMMAND_TRANSPORT = original_transport
 
 
+def test_orchestrator_mqtt_fallback_to_local_on_dispatch_failure():
+    original_transport = orchestrator_api.COMMAND_TRANSPORT
+    original_fail_open = orchestrator_api.ORC_DISPATCH_FAIL_OPEN
+    original_strict = orchestrator_api.INTEGRATION_STRICT
+    try:
+        orchestrator_api.COMMAND_TRANSPORT = "mqtt"
+        orchestrator_api.ORC_DISPATCH_FAIL_OPEN = True
+        orchestrator_api.INTEGRATION_STRICT = False
+        orchestrator_api.LOCAL_COMMAND_EVENTS.clear()
+        with __import__("unittest").mock.patch(
+            "app.services.orchestrator_api.publish_command",
+            side_effect=OSError("getaddrinfo failed"),
+        ):
+            orchestrator_api.dispatch_command("factory/light/on", "1")
+        assert orchestrator_api.LOCAL_COMMAND_EVENTS == [{"topic": "factory/light/on", "payload": "1"}]
+    finally:
+        orchestrator_api.COMMAND_TRANSPORT = original_transport
+        orchestrator_api.ORC_DISPATCH_FAIL_OPEN = original_fail_open
+        orchestrator_api.INTEGRATION_STRICT = original_strict
+
+
 def test_alert_raise_and_ack_flow():
     orchestrator_api.reset_state_for_tests()
     created = orchestrator_api.raise_alert(orchestrator_api.AlertRaiseRequest(message="Тест тревоги", timeout_seconds=10))
