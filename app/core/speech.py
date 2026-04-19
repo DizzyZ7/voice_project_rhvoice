@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -31,29 +32,10 @@ try:
 except ImportError:
     WhisperModel = None
 
-try:
-    import winsound
-except ImportError:
-    winsound = None
-
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_RHVOICE_BIN = os.environ.get("RHVOICE_BIN")
-DEFAULT_WINDOWS_VOICE = os.environ.get("RHVOICE_WINDOWS_VOICE")
-DEFAULT_PIPER_BIN = os.environ.get("PIPER_BIN")
-DEFAULT_PIPER_MODEL = os.environ.get("PIPER_MODEL")
-DEFAULT_STT_BACKEND = os.environ.get("STT_BACKEND", "vosk").strip().lower()
-DEFAULT_TTS_BACKEND = os.environ.get("TTS_BACKEND", "auto").strip().lower()
-DEFAULT_TTS_CACHE_DIR = Path(os.environ.get("TTS_CACHE_DIR", str(BASE_DIR / "tmp-tts-cache"))).resolve()
-DEFAULT_TTS_CACHE_TTL_SECONDS = int(os.environ.get("TTS_CACHE_TTL_SECONDS", "86400"))
-STT_ENABLE_VAD = os.environ.get("STT_ENABLE_VAD", "1").strip().lower() in {"1", "true", "yes", "on"}
-STT_VAD_RMS_THRESHOLD = int(os.environ.get("STT_VAD_RMS_THRESHOLD", "220"))
-STT_VAD_MIN_SPEECH_RATIO = float(os.environ.get("STT_VAD_MIN_SPEECH_RATIO", "0.02"))
-DEFAULT_FASTER_WHISPER_MODEL = os.environ.get("FASTER_WHISPER_MODEL", "small")
-DEFAULT_FASTER_WHISPER_DEVICE = os.environ.get("FASTER_WHISPER_DEVICE", "cpu")
-DEFAULT_FASTER_WHISPER_COMPUTE_TYPE = os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "int8")
 
 
 def choose_vosk_model_path(base_dir: Path, env_model_path: str | None) -> str:
@@ -68,7 +50,24 @@ def choose_vosk_model_path(base_dir: Path, env_model_path: str | None) -> str:
     return str(candidates[0])
 
 
+DEFAULT_STT_BACKEND = os.environ.get("STT_BACKEND", "vosk")
 DEFAULT_VOSK_MODEL_PATH = choose_vosk_model_path(BASE_DIR, os.environ.get("VOSK_MODEL_PATH"))
+DEFAULT_FASTER_WHISPER_MODEL_REF = os.environ.get("FASTER_WHISPER_MODEL", "small")
+DEFAULT_FASTER_WHISPER_DEVICE = os.environ.get("FASTER_WHISPER_DEVICE", "cpu")
+DEFAULT_FASTER_WHISPER_COMPUTE_TYPE = os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "int8")
+DEFAULT_FASTER_WHISPER_LANGUAGE = os.environ.get("FASTER_WHISPER_LANGUAGE", "ru")
+DEFAULT_FASTER_WHISPER_BEAM_SIZE = int(os.environ.get("FASTER_WHISPER_BEAM_SIZE", "1"))
+DEFAULT_FASTER_WHISPER_VAD_FILTER = os.environ.get("FASTER_WHISPER_VAD_FILTER", "1")
+DEFAULT_STT_MIC_VAD_RMS_THRESHOLD = int(os.environ.get("STT_MIC_VAD_RMS_THRESHOLD", "0"))
+
+DEFAULT_RHVOICE_BIN = os.environ.get("RHVOICE_BIN")
+DEFAULT_WINDOWS_VOICE = os.environ.get("RHVOICE_WINDOWS_VOICE")
+DEFAULT_TTS_BACKEND = os.environ.get("TTS_BACKEND", "rhvoice")
+DEFAULT_PIPER_BIN = os.environ.get("PIPER_BIN")
+DEFAULT_PIPER_MODEL_PATH = os.environ.get("PIPER_MODEL_PATH")
+DEFAULT_PIPER_VOICE_MODELS = os.environ.get("PIPER_VOICE_MODELS", "{}")
+DEFAULT_TTS_CACHE_ENABLED = os.environ.get("TTS_CACHE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_TTS_CACHE_DIR = Path(os.environ.get("TTS_CACHE_DIR", str(BASE_DIR / "cache" / "tts"))).resolve()
 
 
 @dataclass
@@ -86,10 +85,6 @@ class Diagnostics:
     rhvoice_backend: Optional[str]
     rhvoice_target: Optional[str]
     rhvoice_available: bool
-    piper_binary: Optional[str]
-    piper_model: Optional[str]
-    piper_available: bool
-    faster_whisper_available: bool
     sounddevice_available: bool
     stt_backend: str = "vosk"
     stt_backend_available: bool = False
@@ -100,25 +95,10 @@ class Diagnostics:
     piper_model_path: Optional[str] = None
 
 
-def setup_logger(name: str, log_file: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-    file_handler = logging.FileHandler(LOG_DIR / log_file, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    logger.addHandler(stream_handler)
-    return logger
-
-
 @dataclass(frozen=True)
 class SimpleEnergyVAD:
-    rms_threshold: int = STT_VAD_RMS_THRESHOLD
-    min_speech_ratio: float = STT_VAD_MIN_SPEECH_RATIO
+    rms_threshold: int = int(os.environ.get("STT_VAD_RMS_THRESHOLD", "220"))
+    min_speech_ratio: float = float(os.environ.get("STT_VAD_MIN_SPEECH_RATIO", "0.02"))
     frame_ms: int = 30
 
     def has_speech(self, pcm_bytes: bytes, sample_rate: int) -> bool:
@@ -145,36 +125,137 @@ def _rms_int16(pcm_bytes: bytes) -> float:
     sample_count = len(pcm_bytes) // 2
     if sample_count == 0:
         return 0.0
-    energy = 0.0
+    squared_total = 0.0
     for offset in range(0, sample_count * 2, 2):
         value = int.from_bytes(pcm_bytes[offset : offset + 2], byteorder="little", signed=True)
-        energy += float(value * value)
-    return (energy / sample_count) ** 0.5
+        squared_total += float(value * value)
+    return (squared_total / sample_count) ** 0.5
 
 
-def _read_wav_pcm16_mono_16k(wav_path: str) -> tuple[int, bytes] | tuple[None, None]:
-    try:
-        with wave.open(wav_path, "rb") as wf:
-            if wf.getnchannels() != 1 or wf.getframerate() != 16000 or wf.getsampwidth() != 2:
-                return None, None
-            return wf.getframerate(), wf.readframes(wf.getnframes())
-    except Exception:
-        return None, None
+def setup_logger(name: str, log_file: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    file_handler = logging.FileHandler(LOG_DIR / log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    return logger
 
 
-def _play_wav_file(path: Path, logger: logging.Logger) -> None:
-    if os.name == "nt" and winsound is not None:
-        winsound.PlaySound(str(path), winsound.SND_FILENAME)
-        return
-    aplay = shutil.which("aplay")
-    if aplay:
-        subprocess.run([aplay, str(path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return
-    logger.warning("Аудиоплеер не найден, WAV сохранен: %s", path)
+def _normalize_stt_backend_name(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
 
 
-class RHVoiceTTS:
-    """Thin adapter around the RHVoice CLI tools."""
+def _normalize_tts_backend_name(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.strip().split()).lower()
+
+
+class SpeechRecognizer:
+    backend_name = "unknown"
+
+    def transcribe_from_wav(self, wav_path: str) -> STTResult:
+        raise NotImplementedError
+
+    def transcribe_from_microphone(self, timeout: int = 5) -> STTResult:
+        raise NotImplementedError
+
+    @staticmethod
+    def _capture_microphone_chunks(
+        timeout: int,
+        logger: logging.Logger,
+        sample_rate: int = 16000,
+        blocksize: int = 8000,
+    ) -> tuple[list[bytes], Optional[str]]:
+        if sd is None:
+            return [], "sounddevice не установлен"
+
+        audio_queue: queue.Queue[bytes] = queue.Queue()
+        stop_event = threading.Event()
+
+        def callback(indata, frames, time_info, status):
+            del frames, time_info
+            if status:
+                logger.warning("Audio status: %s", status)
+            audio_queue.put(bytes(indata))
+            if stop_event.is_set():
+                raise sd.CallbackStop()
+
+        try:
+            with sd.RawInputStream(
+                samplerate=sample_rate,
+                blocksize=blocksize,
+                dtype="int16",
+                channels=1,
+                callback=callback,
+            ):
+                logger.info("Начало записи с микрофона на %s сек", timeout)
+                sd.sleep(int(timeout * 1000))
+                stop_event.set()
+        except Exception as exc:
+            logger.exception("Ошибка захвата аудио")
+            return [], str(exc)
+
+        chunks: list[bytes] = []
+        while not audio_queue.empty():
+            chunks.append(audio_queue.get())
+        return chunks, None
+
+    @staticmethod
+    def _apply_energy_vad(chunks: list[bytes], rms_threshold: int) -> list[bytes]:
+        if rms_threshold <= 0:
+            return chunks
+        return [chunk for chunk in chunks if SpeechRecognizer._chunk_rms(chunk) >= rms_threshold]
+
+    @staticmethod
+    def _chunk_rms(chunk: bytes) -> float:
+        if not chunk:
+            return 0.0
+        sample_count = len(chunk) // 2
+        if sample_count <= 0:
+            return 0.0
+        squared_total = 0.0
+        for (sample,) in struct.iter_unpack("<h", chunk[: sample_count * 2]):
+            squared_total += float(sample * sample)
+        return (squared_total / sample_count) ** 0.5
+
+
+class SpeechSynthesizer:
+    backend_name = "unknown"
+
+    def speak(
+        self,
+        text: str,
+        speed: float = 1.0,
+        pitch: float = 0.0,
+        voice: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> None:
+        raise NotImplementedError
+
+    def synthesize_to_wav(
+        self,
+        text: str,
+        output_path: str | Path,
+        speed: float = 1.0,
+        pitch: float = 0.0,
+        voice: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> Path:
+        raise NotImplementedError
+
+
+class RHVoiceTTS(SpeechSynthesizer):
+    """Thin adapter around RHVoice CLI tools with file-level caching."""
+    backend_name = "rhvoice"
 
     def __init__(self, binary: Optional[str] = None, logger: Optional[logging.Logger] = None):
         self.logger = logger or setup_logger("tts", "tts.log")
@@ -204,12 +285,6 @@ class RHVoiceTTS:
             "Не найден RHVoice CLI (RHVoice-test/rhvoice.test) и не удалось инициализировать Windows SAPI голос. "
             "Установите RHVoice и укажите RHVOICE_BIN или RHVOICE_WINDOWS_VOICE."
         )
-
-    @property
-    def engine_id(self) -> str:
-        if self.backend == "windows_sapi":
-            return f"rhvoice:{self.backend}:{self.windows_voice or 'default'}"
-        return f"rhvoice:{self.backend}:{self.binary or 'unknown'}"
 
     @staticmethod
     def _discover_binary() -> Optional[str]:
@@ -436,22 +511,37 @@ class RHVoiceTTS:
         return output
 
 
-class PiperTTS:
-    def __init__(self, binary: Optional[str] = None, model: Optional[str] = None, logger: Optional[logging.Logger] = None):
+class PiperTTS(SpeechSynthesizer):
+    """Adapter for Piper CLI with speed control and wav cache."""
+
+    backend_name = "piper"
+
+    def __init__(
+        self,
+        binary: Optional[str] = None,
+        model_path: Optional[str] = None,
+        logger: Optional[logging.Logger] = None,
+    ):
         self.logger = logger or setup_logger("tts", "tts.log")
         self.binary = binary or self._discover_binary()
-        self.model = model or DEFAULT_PIPER_MODEL
-        if not self.binary:
-            raise FileNotFoundError("Не найден piper CLI. Установите Piper и укажите PIPER_BIN.")
-        if not self.model:
-            raise FileNotFoundError("Не задан PIPER_MODEL (путь к .onnx модели Piper).")
-        if not Path(self.model).exists():
-            raise FileNotFoundError(f"Модель Piper не найдена: {self.model}")
-        self.logger.info("Используется Piper: %s, модель: %s", self.binary, self.model)
+        self.default_model_path = model_path or DEFAULT_PIPER_MODEL_PATH
+        self.voice_models = self._load_voice_models(DEFAULT_PIPER_VOICE_MODELS)
+        self.cache_enabled = DEFAULT_TTS_CACHE_ENABLED
+        self.cache_dir = DEFAULT_TTS_CACHE_DIR
+        self._pitch_warning_emitted = False
 
-    @property
-    def engine_id(self) -> str:
-        return f"piper:{self.binary}:{self.model}"
+        if self.cache_enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.binary:
+            raise FileNotFoundError(
+                "Не найден Piper CLI бинарник. Установите piper и задайте PIPER_BIN при необходимости."
+            )
+        if not self.default_model_path and not self.voice_models:
+            raise FileNotFoundError(
+                "Не задана модель Piper. Укажите PIPER_MODEL_PATH или PIPER_VOICE_MODELS (JSON map)."
+            )
+        self.logger.info("Используется Piper бинарник: %s", self.binary)
 
     @staticmethod
     def _discover_binary() -> Optional[str]:
@@ -461,55 +551,174 @@ class PiperTTS:
                 return candidate
         return None
 
-    def speak(self, text: str) -> None:
+    @staticmethod
+    def _load_voice_models(raw: str) -> dict[str, str]:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        result: dict[str, str] = {}
+        for key, value in parsed.items():
+            if isinstance(key, str) and isinstance(value, str):
+                result[key] = value
+        return result
+
+    @staticmethod
+    def _normalize_speed(speed: float) -> float:
+        return min(2.0, max(0.5, float(speed)))
+
+    @staticmethod
+    def _normalize_pitch(pitch: float) -> float:
+        return min(12.0, max(-12.0, float(pitch)))
+
+    @staticmethod
+    def _speed_to_length_scale(speed: float) -> float:
+        safe_speed = max(0.1, speed)
+        return min(2.5, max(0.3, 1.0 / safe_speed))
+
+    def _resolve_model_path(self, voice: Optional[str]) -> Path:
+        candidate: Optional[str] = None
+        if voice:
+            if voice in self.voice_models:
+                candidate = self.voice_models[voice]
+            else:
+                candidate = voice
+        elif self.default_model_path:
+            candidate = self.default_model_path
+        elif self.voice_models:
+            candidate = next(iter(self.voice_models.values()))
+
+        if not candidate:
+            raise FileNotFoundError("Не удалось определить модель Piper (voice/model not set)")
+        resolved = Path(candidate).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Модель Piper не найдена: {resolved}")
+        return resolved
+
+    def _cache_key(self, text: str, model_path: Path, speed: float, pitch: float, voice: Optional[str]) -> str:
+        payload = {
+            "backend": self.backend_name,
+            "binary": self.binary or "",
+            "model": str(model_path),
+            "voice": voice or "",
+            "speed": round(speed, 3),
+            "pitch": round(pitch, 3),
+            "text": text,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _cached_wav_path(self, key: str) -> Path:
+        return self.cache_dir / f"{key}.wav"
+
+    def _run_piper(self, text: str, output: Path, model_path: Path, speed: float, pitch: float) -> None:
+        if pitch != 0.0 and not self._pitch_warning_emitted:
+            self.logger.warning("Piper backend не поддерживает pitch напрямую; параметр будет проигнорирован")
+            self._pitch_warning_emitted = True
+
+        cmd = [
+            self.binary,
+            "--model",
+            str(model_path),
+            "--output_file",
+            str(output),
+            "--length_scale",
+            f"{self._speed_to_length_scale(speed):.3f}",
+        ]
+        result = subprocess.run(cmd, input=text, text=True, capture_output=True, check=True)
+        if result.stderr:
+            self.logger.info("Piper stderr: %s", result.stderr.strip())
+
+    def speak(
+        self,
+        text: str,
+        speed: float = 1.0,
+        pitch: float = 0.0,
+        voice: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> None:
+        text = text.strip()
+        if not text:
+            return
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             wav_path = Path(tmp.name)
         try:
-            self.synthesize_to_wav(text, wav_path)
-            _play_wav_file(wav_path, self.logger)
+            self.synthesize_to_wav(text, wav_path, speed=speed, pitch=pitch, voice=voice, use_cache=use_cache)
+            aplay = shutil.which("aplay")
+            if aplay:
+                subprocess.run([aplay, str(wav_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                self.logger.warning("aplay не найден, WAV сохранен во временный файл: %s", wav_path)
         finally:
-            if wav_path.exists():
+            try:
                 wav_path.unlink()
+            except FileNotFoundError:
+                pass
 
-    def synthesize_to_wav(self, text: str, output_path: str | Path) -> Path:
+    def synthesize_to_wav(
+        self,
+        text: str,
+        output_path: str | Path,
+        speed: float = 1.0,
+        pitch: float = 0.0,
+        voice: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> Path:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         text = text.strip()
         if not text:
             raise ValueError("Пустой текст для синтеза")
 
-        command = [
-            self.binary,
-            "--model",
-            self.model,
-            "--output_file",
-            str(output),
-        ]
-        subprocess.run(command, input=text.encode("utf-8"), check=True, capture_output=True)
+        speed = self._normalize_speed(speed)
+        pitch = self._normalize_pitch(pitch)
+        model_path = self._resolve_model_path(voice=voice)
+        cache_path: Optional[Path] = None
+
+        if use_cache and self.cache_enabled:
+            cache_key = self._cache_key(text=text, model_path=model_path, speed=speed, pitch=pitch, voice=voice)
+            cache_path = self._cached_wav_path(cache_key)
+            if cache_path.exists():
+                shutil.copy2(cache_path, output)
+                self.logger.info("TTS cache hit: %s", cache_key[:12])
+                return output
+
+        self._run_piper(text=text, output=output, model_path=model_path, speed=speed, pitch=pitch)
         self.logger.info("Piper сохранил WAV: %s", output)
+
+        if cache_path and output.exists():
+            try:
+                shutil.copy2(output, cache_path)
+            except Exception:
+                self.logger.warning("Не удалось обновить TTS cache: %s", cache_path)
         return output
 
 
-class CachedTTSEngine:
+class CachedTTSEngine(SpeechSynthesizer):
+    backend_name = "cached"
+
     def __init__(
         self,
-        engine: RHVoiceTTS | PiperTTS,
+        engine: SpeechSynthesizer,
         cache_dir: Path = DEFAULT_TTS_CACHE_DIR,
-        cache_ttl_seconds: int = DEFAULT_TTS_CACHE_TTL_SECONDS,
+        cache_ttl_seconds: int = int(os.environ.get("TTS_CACHE_TTL_SECONDS", "86400")),
         logger: Optional[logging.Logger] = None,
     ):
         self._engine = engine
-        self._cache_dir = cache_dir
+        self._cache_dir = Path(cache_dir)
         self._cache_ttl_seconds = cache_ttl_seconds
         self.logger = logger or setup_logger("tts", "tts.log")
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def engine_id(self) -> str:
-        return f"{self._engine.engine_id}+cache"
+        return f"{getattr(self._engine, 'engine_id', self._engine.__class__.__name__)}+cache"
 
     def _cache_path(self, text: str) -> Path:
-        payload = json.dumps({"engine": self._engine.engine_id, "text": text.strip()}, ensure_ascii=False, sort_keys=True)
+        payload = json.dumps({"engine": self.engine_id, "text": text.strip()}, ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return self._cache_dir / f"{digest}.wav"
 
@@ -533,13 +742,34 @@ class CachedTTSEngine:
         self.logger.info("TTS cache miss: %s", cached_path.name)
         return cached_path
 
-    def speak(self, text: str) -> None:
+    def speak(
+        self,
+        text: str,
+        speed: float = 1.0,
+        pitch: float = 0.0,
+        voice: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> None:
+        del speed, pitch, voice, use_cache
         if not text.strip():
             return
         cached_path = self._ensure_cached(text)
-        _play_wav_file(cached_path, self.logger)
+        aplay = shutil.which("aplay")
+        if aplay:
+            subprocess.run([aplay, str(cached_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            self.logger.warning("Аудиоплеер не найден, WAV сохранен: %s", cached_path)
 
-    def synthesize_to_wav(self, text: str, output_path: str | Path) -> Path:
+    def synthesize_to_wav(
+        self,
+        text: str,
+        output_path: str | Path,
+        speed: float = 1.0,
+        pitch: float = 0.0,
+        voice: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> Path:
+        del speed, pitch, voice, use_cache
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         cached_path = self._ensure_cached(text)
@@ -547,39 +777,23 @@ class CachedTTSEngine:
         return output
 
 
-class VoskRecognizer:
-    def __init__(self, model_path: str = DEFAULT_VOSK_MODEL_PATH, logger: Optional[logging.Logger] = None, use_vad: bool = STT_ENABLE_VAD):
+class VoskRecognizer(SpeechRecognizer):
+    backend_name = "vosk"
+
+    def __init__(self, model_path: str = DEFAULT_VOSK_MODEL_PATH, logger: Optional[logging.Logger] = None):
         if vosk is None:
             raise RuntimeError("Не установлен vosk. Установите: pip install vosk")
         self.model_path = model_path
         self.logger = logger or setup_logger("stt", "stt.log")
-        self.vad = SimpleEnergyVAD() if use_vad else None
+        self.mic_vad_rms_threshold = DEFAULT_STT_MIC_VAD_RMS_THRESHOLD
         if not os.path.isdir(model_path):
             raise FileNotFoundError(
                 f"Модель Vosk не найдена: {model_path}. Скачайте русскую модель и задайте VOSK_MODEL_PATH."
             )
         self.logger.info("Загрузка модели Vosk: %s", model_path)
-        try:
-            self.model = vosk.Model(model_path)
-        except Exception as exc:
-            hint = ""
-            if os.name == "nt" and any(ord(ch) > 127 for ch in model_path):
-                hint = (
-                    " На Windows это часто связано с не-ASCII путём. "
-                    "Переместите модель в путь типа C:\\vosk-model-small-ru-0.22 и укажите VOSK_MODEL_PATH."
-                )
-            raise RuntimeError(f"Не удалось загрузить модель Vosk: {model_path}.{hint}") from exc
-
-    @property
-    def backend_name(self) -> str:
-        return "vosk"
+        self.model = vosk.Model(model_path)
 
     def transcribe_from_wav(self, wav_path: str) -> STTResult:
-        if self.vad is not None:
-            sample_rate, pcm_data = _read_wav_pcm16_mono_16k(wav_path)
-            if sample_rate is not None and pcm_data is not None and not self.vad.has_speech(pcm_data, sample_rate):
-                return STTResult(text="", success=False, error="Речь не обнаружена (VAD)")
-
         try:
             wf = wave.open(wav_path, "rb")
         except FileNotFoundError:
@@ -751,72 +965,12 @@ def create_tts_engine(
     raise ValueError(f"Неподдерживаемый TTS backend: {backend}")
 
 
-class FasterWhisperRecognizer:
-    def __init__(
-        self,
-        model_name: str = DEFAULT_FASTER_WHISPER_MODEL,
-        device: str = DEFAULT_FASTER_WHISPER_DEVICE,
-        compute_type: str = DEFAULT_FASTER_WHISPER_COMPUTE_TYPE,
-        logger: Optional[logging.Logger] = None,
-        use_vad: bool = STT_ENABLE_VAD,
-    ):
-        if WhisperModel is None:
-            raise RuntimeError("Не установлен faster-whisper. Установите: pip install faster-whisper")
-        self.logger = logger or setup_logger("stt", "stt.log")
-        self.model_name = model_name
-        self.vad = SimpleEnergyVAD() if use_vad else None
-        self.logger.info(
-            "Загрузка модели faster-whisper: %s (device=%s, compute_type=%s)",
-            model_name,
-            device,
-            compute_type,
-        )
-        self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
-
-    @property
-    def backend_name(self) -> str:
-        return "faster_whisper"
-
-    def transcribe_from_wav(self, wav_path: str) -> STTResult:
-        if self.vad is not None:
-            sample_rate, pcm_data = _read_wav_pcm16_mono_16k(wav_path)
-            if sample_rate is not None and pcm_data is not None and not self.vad.has_speech(pcm_data, sample_rate):
-                return STTResult(text="", success=False, error="Речь не обнаружена (VAD)")
-        try:
-            segments, _ = self.model.transcribe(
-                wav_path,
-                language="ru",
-                beam_size=1,
-                condition_on_previous_text=False,
-                vad_filter=False,
-            )
-            text = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip().lower()
-            return STTResult(text=text, success=True)
-        except Exception as exc:
-            return STTResult(text="", success=False, error=str(exc))
-
-
-def build_stt_recognizer(backend: str = DEFAULT_STT_BACKEND):
-    backend_name = (backend or "vosk").strip().lower()
-    if backend_name in {"faster_whisper", "whisper"}:
-        return FasterWhisperRecognizer()
-    if backend_name == "vosk":
-        return VoskRecognizer()
-    raise ValueError(f"Неизвестный STT_BACKEND: {backend_name}")
+def build_stt_recognizer(backend: str = DEFAULT_STT_BACKEND) -> SpeechRecognizer:
+    return create_recognizer(backend=backend)
 
 
 def build_tts_engine(backend: str = DEFAULT_TTS_BACKEND) -> CachedTTSEngine:
-    backend_name = (backend or "auto").strip().lower()
-    if backend_name == "rhvoice":
-        return CachedTTSEngine(RHVoiceTTS())
-    if backend_name == "piper":
-        return CachedTTSEngine(PiperTTS())
-    if backend_name == "auto":
-        try:
-            return CachedTTSEngine(PiperTTS())
-        except Exception:
-            return CachedTTSEngine(RHVoiceTTS())
-    raise ValueError(f"Неизвестный TTS_BACKEND: {backend_name}")
+    return CachedTTSEngine(create_tts_engine(backend=backend))
 
 
 def run_diagnostics(model_path: str = DEFAULT_VOSK_MODEL_PATH) -> Diagnostics:
@@ -839,8 +993,25 @@ def run_diagnostics(model_path: str = DEFAULT_VOSK_MODEL_PATH) -> Diagnostics:
             rhvoice_target = windows_voice
             rhvoice_available = True
 
-    piper_binary = PiperTTS._discover_binary()
-    piper_model = DEFAULT_PIPER_MODEL if DEFAULT_PIPER_MODEL and Path(DEFAULT_PIPER_MODEL).exists() else None
+    stt_backend = _normalize_stt_backend_name(DEFAULT_STT_BACKEND)
+    if stt_backend == "vosk":
+        stt_backend_available = os.path.isdir(model_path)
+    else:
+        stt_backend_available = WhisperModel is not None
+
+    piper_model_exists = False
+    if piper_model_path and Path(piper_model_path).expanduser().resolve().exists():
+        piper_model_exists = True
+    elif piper_models:
+        piper_model_exists = any(Path(path).expanduser().resolve().exists() for path in piper_models.values())
+
+    tts_backend = _normalize_tts_backend_name(DEFAULT_TTS_BACKEND)
+    if tts_backend in {"rhvoice", "rhvoice_cli"}:
+        tts_backend_available = rhvoice_available
+    elif tts_backend == "piper":
+        tts_backend_available = bool(piper_binary and piper_model_exists)
+    else:
+        tts_backend_available = False
 
     return Diagnostics(
         vosk_model_exists=os.path.isdir(model_path),
@@ -848,9 +1019,12 @@ def run_diagnostics(model_path: str = DEFAULT_VOSK_MODEL_PATH) -> Diagnostics:
         rhvoice_backend=rhvoice_backend,
         rhvoice_target=rhvoice_target,
         rhvoice_available=rhvoice_available,
-        piper_binary=piper_binary,
-        piper_model=piper_model,
-        piper_available=bool(piper_binary and piper_model),
+        sounddevice_available=sd is not None and (vosk is not None or WhisperModel is not None),
+        stt_backend=stt_backend,
+        stt_backend_available=stt_backend_available,
         faster_whisper_available=WhisperModel is not None,
-        sounddevice_available=sd is not None and vosk is not None,
+        tts_backend=tts_backend,
+        tts_backend_available=tts_backend_available,
+        piper_binary=piper_binary,
+        piper_model_path=piper_model_path,
     )

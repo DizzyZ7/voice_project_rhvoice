@@ -4,6 +4,8 @@ from app.core.speech import (
     FasterWhisperRecognizer,
     PiperTTS,
     RHVoiceTTS,
+    SpeechRecognizer,
+    SpeechSynthesizer,
     STTResult,
     VoskRecognizer,
     build_stt_recognizer,

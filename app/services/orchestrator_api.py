@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from paho.mqtt.publish import single as mqtt_publish
 from pydantic import BaseModel
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -434,7 +434,7 @@ def process_audio(
     x_client_id: str | None = Header(default=None, alias="X-Client-Id"),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, str]:
+) -> dict[str, object]:
     _sweep_alerts()
     idempotency_key = _normalize_idempotency_key(idempotency_key)
     ORC_REQUESTS_TOTAL.inc()
@@ -445,7 +445,7 @@ def process_audio(
     if idempotency_key:
         cached = _get_idempotent_response("process_audio", idempotency_key)
         if cached is not None:
-            return {k: str(v) for k, v in cached.items()}
+            return cached
 
     stt_start = time.perf_counter()
     try:
@@ -470,6 +470,8 @@ def process_audio(
         raise HTTPException(status_code=502, detail=f"STT service returned invalid JSON: {exc}")
     recognised_text: str = stt_json.get("text", "").strip().lower()
     stt_confidence = stt_json.get("confidence")
+    if not isinstance(stt_confidence, (float, int)):
+        stt_confidence = None
     spec, confidence = resolve_command_with_score(recognised_text)
     if spec and confidence >= COMMAND_CONFIDENCE_THRESHOLD:
         ORC_COMMANDS_TOTAL.labels(command=spec.key).inc()
@@ -515,7 +517,7 @@ def process_audio(
         raise HTTPException(status_code=502, detail=f"TTS service error: {exc}")
     finally:
         ORC_TTS_LATENCY_SECONDS.observe(time.perf_counter() - tts_start)
-    response_payload = {"text": recognised_text, "command": "unknown", "status": "unknown"}
+    response_payload = {"text": recognised_text, "command": "unknown", "status": "unknown", "confidence": stt_confidence}
     if idempotency_key:
         _save_idempotent_response("process_audio", idempotency_key, response_payload)
     return response_payload
