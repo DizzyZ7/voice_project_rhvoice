@@ -627,23 +627,16 @@ class PiperTTS(SpeechSynthesizer):
             "--length_scale",
             f"{self._speed_to_length_scale(speed):.3f}",
         ]
-        temp_input_path: Path | None = None
-        run_kwargs: dict[str, object] = {"capture_output": True, "check": True, "text": True}
-        if os.name == "nt":
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".txt", delete=False) as tmp:
-                tmp.write(text)
-                temp_input_path = Path(tmp.name)
-            cmd.extend(["--input_file", str(temp_input_path)])
-        else:
-            run_kwargs.update({"input": text})
-        try:
-            result = subprocess.run(cmd, **run_kwargs)
-        finally:
-            if temp_input_path is not None:
-                try:
-                    temp_input_path.unlink()
-                except FileNotFoundError:
-                    pass
+        # On Windows, --input_file can hang with some Piper builds.
+        # Feed stdin explicitly as UTF-8 to keep Russian text stable.
+        result = subprocess.run(
+            cmd,
+            input=text,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=True,
+        )
         if result.stderr:
             self.logger.info("Piper stderr: %s", result.stderr.strip())
 
@@ -999,6 +992,11 @@ def create_tts_engine(
         return RHVoiceTTS(logger=logger)
     if resolved_backend == "piper":
         return PiperTTS(model_path=model_path or DEFAULT_PIPER_MODEL_PATH, logger=logger)
+    if resolved_backend == "auto":
+        try:
+            return PiperTTS(model_path=model_path or DEFAULT_PIPER_MODEL_PATH, logger=logger)
+        except Exception:
+            return RHVoiceTTS(logger=logger)
     raise ValueError(f"Неподдерживаемый TTS backend: {backend}")
 
 
