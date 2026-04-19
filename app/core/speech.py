@@ -64,7 +64,7 @@ DEFAULT_RHVOICE_BIN = os.environ.get("RHVOICE_BIN")
 DEFAULT_WINDOWS_VOICE = os.environ.get("RHVOICE_WINDOWS_VOICE")
 DEFAULT_TTS_BACKEND = os.environ.get("TTS_BACKEND", "rhvoice")
 DEFAULT_PIPER_BIN = os.environ.get("PIPER_BIN")
-DEFAULT_PIPER_MODEL_PATH = os.environ.get("PIPER_MODEL_PATH")
+DEFAULT_PIPER_MODEL_PATH = os.environ.get("PIPER_MODEL_PATH") or os.environ.get("PIPER_MODEL")
 DEFAULT_PIPER_VOICE_MODELS = os.environ.get("PIPER_VOICE_MODELS", "{}")
 DEFAULT_TTS_CACHE_ENABLED = os.environ.get("TTS_CACHE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_TTS_CACHE_DIR = Path(os.environ.get("TTS_CACHE_DIR", str(BASE_DIR / "cache" / "tts"))).resolve()
@@ -627,7 +627,23 @@ class PiperTTS(SpeechSynthesizer):
             "--length_scale",
             f"{self._speed_to_length_scale(speed):.3f}",
         ]
-        result = subprocess.run(cmd, input=text, text=True, capture_output=True, check=True)
+        temp_input_path: Path | None = None
+        run_kwargs: dict[str, object] = {"capture_output": True, "check": True, "text": True}
+        if os.name == "nt":
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".txt", delete=False) as tmp:
+                tmp.write(text)
+                temp_input_path = Path(tmp.name)
+            cmd.extend(["--input_file", str(temp_input_path)])
+        else:
+            run_kwargs.update({"input": text})
+        try:
+            result = subprocess.run(cmd, **run_kwargs)
+        finally:
+            if temp_input_path is not None:
+                try:
+                    temp_input_path.unlink()
+                except FileNotFoundError:
+                    pass
         if result.stderr:
             self.logger.info("Piper stderr: %s", result.stderr.strip())
 
@@ -717,8 +733,18 @@ class CachedTTSEngine(SpeechSynthesizer):
     def engine_id(self) -> str:
         return f"{getattr(self._engine, 'engine_id', self._engine.__class__.__name__)}+cache"
 
-    def _cache_path(self, text: str) -> Path:
-        payload = json.dumps({"engine": self.engine_id, "text": text.strip()}, ensure_ascii=False, sort_keys=True)
+    def _cache_path(self, text: str, speed: float, pitch: float, voice: Optional[str]) -> Path:
+        payload = json.dumps(
+            {
+                "engine": self.engine_id,
+                "text": text.strip(),
+                "speed": round(float(speed), 3),
+                "pitch": round(float(pitch), 3),
+                "voice": voice or "",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return self._cache_dir / f"{digest}.wav"
 
@@ -730,15 +756,19 @@ class CachedTTSEngine(SpeechSynthesizer):
         age = time.time() - path.stat().st_mtime
         return age <= self._cache_ttl_seconds
 
-    def _ensure_cached(self, text: str) -> Path:
+    def _ensure_cached(self, text: str, speed: float, pitch: float, voice: Optional[str]) -> Path:
         key = text.strip()
         if not key:
             raise ValueError("Пустой текст для синтеза")
-        cached_path = self._cache_path(key)
+        cached_path = self._cache_path(key, speed=speed, pitch=pitch, voice=voice)
         if self._is_fresh(cached_path):
             self.logger.info("TTS cache hit: %s", cached_path.name)
             return cached_path
-        self._engine.synthesize_to_wav(key, cached_path)
+        try:
+            self._engine.synthesize_to_wav(key, cached_path, speed=speed, pitch=pitch, voice=voice, use_cache=True)
+        except TypeError:
+            # Backward compatibility with engines that expose legacy signature.
+            self._engine.synthesize_to_wav(key, cached_path)
         self.logger.info("TTS cache miss: %s", cached_path.name)
         return cached_path
 
@@ -750,10 +780,12 @@ class CachedTTSEngine(SpeechSynthesizer):
         voice: Optional[str] = None,
         use_cache: bool = True,
     ) -> None:
-        del speed, pitch, voice, use_cache
         if not text.strip():
             return
-        cached_path = self._ensure_cached(text)
+        if not use_cache:
+            self._engine.speak(text, speed=speed, pitch=pitch, voice=voice, use_cache=False)
+            return
+        cached_path = self._ensure_cached(text, speed=speed, pitch=pitch, voice=voice)
         aplay = shutil.which("aplay")
         if aplay:
             subprocess.run([aplay, str(cached_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -769,10 +801,15 @@ class CachedTTSEngine(SpeechSynthesizer):
         voice: Optional[str] = None,
         use_cache: bool = True,
     ) -> Path:
-        del speed, pitch, voice, use_cache
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        cached_path = self._ensure_cached(text)
+        if not use_cache:
+            try:
+                self._engine.synthesize_to_wav(text, output, speed=speed, pitch=pitch, voice=voice, use_cache=False)
+            except TypeError:
+                self._engine.synthesize_to_wav(text, output)
+            return output
+        cached_path = self._ensure_cached(text, speed=speed, pitch=pitch, voice=voice)
         shutil.copy2(cached_path, output)
         return output
 

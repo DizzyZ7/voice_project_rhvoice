@@ -15,7 +15,7 @@ from app.commands.registry import (
     resolve_command_with_score,
     response_text_for_command,
 )
-from app.core.speech import VoskRecognizer, build_tts_engine, run_diagnostics
+from app.core.speech import build_tts_engine, create_recognizer, run_diagnostics
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -256,6 +256,7 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
     recognizer = create_recognizer()
     latencies_ms: list[float] = []
     mismatches: list[dict[str, str]] = []
+    stt_pairs: list[tuple[str, str]] = []
     total_ref_words = 0
     total_word_edits = 0.0
     tracemalloc.start()
@@ -267,6 +268,7 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
         latencies_ms.append((time.perf_counter() - started) * 1000)
         actual = result.text if result.success else ""
         expected_text = item["expected_text"]
+        stt_pairs.append((expected_text, actual))
         ref_words = [token for token in expected_text.strip().split() if token]
         if ref_words:
             case_wer = word_error_rate(expected_text, actual)
@@ -278,7 +280,7 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
             mismatches.append(
                 {
                     "wav_path": item["wav_path"],
-                    "expected_text": expected,
+                    "expected_text": expected_text,
                     "actual_text": actual,
                     "error": result.error or "",
                     "wer": round(case_wer, 4),
@@ -290,6 +292,7 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
     tracemalloc.stop()
     accuracy = ((len(wav_cases) - len(mismatches)) / len(wav_cases) * 100) if wav_cases else 0.0
     wer_percent = (total_word_edits / total_ref_words * 100) if total_ref_words > 0 else 0.0
+    error_summary = summarize_error_rates(stt_pairs)
     return {
         "status": "ok",
         "backend": getattr(recognizer, "backend_name", recognizer.__class__.__name__),

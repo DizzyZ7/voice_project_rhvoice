@@ -6,7 +6,6 @@ import sqlite3
 import threading
 import time
 import logging
-import threading
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -17,7 +16,6 @@ import requests
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from paho.mqtt.publish import single as mqtt_publish
-from pydantic import BaseModel
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -40,7 +38,6 @@ MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(2 * 1024 * 1024)))
 RATE_LIMITER = InMemoryRateLimiter(RateLimitConfig(requests=60, window_seconds=60))
 UPSTREAM_TIMEOUT_SECONDS = float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "15"))
 VOICE_API_TOKEN = os.environ.get("VOICE_API_TOKEN", "dev-token-change-me")
-COMMAND_TRANSPORT = os.environ.get("COMMAND_TRANSPORT", "local").strip().lower()
 ALERT_DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("ALERT_DEFAULT_TIMEOUT_SECONDS", "30"))
 ORC_HTTP_TRUST_ENV = os.environ.get("ORC_HTTP_TRUST_ENV", "").strip().lower() in {"1", "true", "yes", "on"}
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -182,10 +179,6 @@ class AlertState:
 class AlertRaiseRequest(BaseModel):
     message: str
     timeout_seconds: int = ALERT_DEFAULT_TIMEOUT_SECONDS
-
-
-class AlertAckRequest(BaseModel):
-    operator_id: str
 
 
 ALERTS: dict[str, AlertState] = {}
