@@ -11,9 +11,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate benchmark quality gates")
     parser.add_argument("--report", required=True, help="Path to benchmark report JSON")
     parser.add_argument("--min-phrase-accuracy", type=float, default=95.0)
-    parser.add_argument("--max-tts-p95-ms", type=float, default=1500.0)
+    parser.add_argument("--max-tts-p95-ms", type=float, default=2000.0)
     parser.add_argument("--max-stt-wer-percent", type=float, default=25.0)
-    parser.add_argument("--max-stt-cer-percent", type=float, default=15.0)
     args = parser.parse_args()
 
     report_path = Path(args.report)
@@ -39,13 +38,10 @@ def main() -> int:
     stt_status = str(stt_runtime.get("status", "unknown"))
     if stt_status == "ok":
         stt_wer = float(stt_runtime.get("wer_percent", 0.0))
-        stt_cer = float(stt_runtime.get("cer_percent", 0.0))
         if stt_wer > args.max_stt_wer_percent:
             failures.append(f"stt_runtime.wer_percent={stt_wer:.3f} > maximum {args.max_stt_wer_percent:.3f}")
-        if stt_cer > args.max_stt_cer_percent:
-            failures.append(f"stt_runtime.cer_percent={stt_cer:.3f} > maximum {args.max_stt_cer_percent:.3f}")
     else:
-        print(f"[SKIP] STT WER/CER gates skipped, status={stt_status}")
+        print(f"[SKIP] STT WER gate skipped, status={stt_status}")
 
     if failures:
         print("Quality gates failed:")

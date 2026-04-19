@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, start_http_server
 
 from app.core.security import InMemoryRateLimiter, RateLimitConfig, require_api_token
-from app.core.speech import SpeechSynthesizer, create_tts_engine
+from app.core.speech import build_tts_engine
 
 
 TTS_REQUESTS_TOTAL = Counter("tts_requests_total", "Total number of text-to-speech requests")
@@ -32,17 +32,18 @@ class TTSRequest(BaseModel):
     use_cache: bool = True
 
 
-tts_engine: Optional[SpeechSynthesizer] = None
+tts_engine: Optional[object] = None
 TTS_OUTPUT_DIR = Path(os.environ.get("TTS_OUTPUT_DIR", "/tmp/tts-output")).resolve()
 MAX_TTS_TEXT_LENGTH = int(os.environ.get("MAX_TTS_TEXT_LENGTH", "400"))
 RATE_LIMITER = InMemoryRateLimiter(RateLimitConfig(requests=60, window_seconds=60))
+TTS_BACKEND = os.environ.get("TTS_BACKEND", "auto")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
     global tts_engine
-    tts_engine = create_tts_engine()
+    tts_engine = build_tts_engine(TTS_BACKEND)
     start_http_server(9102)
     yield
 

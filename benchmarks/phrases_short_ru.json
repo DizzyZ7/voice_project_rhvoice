@@ -1,0 +1,8 @@
+[
+  {"text": "включи свет", "expected_command": "turn_on_light", "approx_duration_sec": 2},
+  {"text": "выключи свет", "expected_command": "turn_off_light", "approx_duration_sec": 2},
+  {"text": "температура", "expected_command": "get_temperature", "approx_duration_sec": 1},
+  {"text": "подтвердить тревогу", "expected_command": "acknowledge_alarm", "approx_duration_sec": 2},
+  {"text": "отмена тревоги", "expected_command": "cancel_alarm", "approx_duration_sec": 2},
+  {"text": "отбой эвакуации", "expected_command": "stop_evacuation", "approx_duration_sec": 2}
+]

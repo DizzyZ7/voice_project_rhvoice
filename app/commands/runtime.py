@@ -27,7 +27,11 @@ def get_temperature(tts: SpeechSynthesizer) -> None:
     tts.speak(f"Сейчас температура {temperature} градусов")
 
 
-def unknown_command(command: str, tts: SpeechSynthesizer) -> None:
+def execute_generic_action(action_name: str) -> None:
+    logger.info("[ACTION] %s", action_name)
+
+
+def unknown_command(command: str, tts: RHVoiceTTS) -> None:
     logger.warning("Неизвестная команда: %s", command)
     tts.speak(UNKNOWN_COMMAND_REPLY)
 
@@ -46,11 +50,21 @@ def parse_and_execute(command: str, tts: SpeechSynthesizer) -> bool:
         "turn_on_light": turn_on_light,
         "turn_off_light": turn_off_light,
         "get_temperature": lambda: get_temperature(tts),
+        "acknowledge_alarm": lambda: execute_generic_action("Подтверждение тревоги"),
+        "cancel_alarm": lambda: execute_generic_action("Сброс тревоги"),
+        "start_evacuation": lambda: execute_generic_action("Запуск эвакуационного оповещения"),
+        "stop_evacuation": lambda: execute_generic_action("Остановка эвакуационного оповещения"),
+        "announce_pressure_alert": lambda: execute_generic_action("Аварийное оповещение по превышению давления"),
+        "announce_fire_alert": lambda: execute_generic_action("Пожарное оповещение"),
     }
     spec = resolve_command(command)
     if spec:
         logger.info("Команда сопоставлена: %s -> %s", command, spec.key)
-        actions[spec.key]()
+        handler = actions.get(spec.key)
+        if handler:
+            handler()
+        else:
+            execute_generic_action(f"Команда без явного обработчика: {spec.key}")
         if spec.key != "get_temperature":
             tts.speak(DONE_REPLY)
         return True

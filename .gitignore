@@ -8,11 +8,25 @@ __pycache__/
 logs/
 cache/
 tmp-tts-output/
+tmp-tts-cache/
 reports/tts/
+reports/soak_report.json
+reports/stt_noise_benchmark.json
+reports/bench_short.json
+reports/bench_medium.json
+reports/bench_long.json
 third_party/downloads/
 third_party/rhvoice_nvda/
 models/vosk-model-small-ru-0.22/
 models/vosk-model-small-ru-0.22.zip
+models/piper/
+tools/
+data/
+voice_test.wav
+voice_test_long.wav
+tmp-tts-cache-short/
+tmp-tts-cache-medium/
+tmp-tts-cache-long/
 
 .DS_Store
 Thumbs.db

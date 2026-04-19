@@ -1,0 +1,64 @@
+{
+  "topics": {
+    "factory/light/on": {
+      "handler": "gpio",
+      "pin": 17,
+      "value": 1
+    },
+    "factory/light/off": {
+      "handler": "gpio",
+      "pin": 17,
+      "value": 0
+    },
+    "factory/temperature/request": {
+      "handler": "modbus",
+      "host": "127.0.0.1",
+      "port": 502,
+      "unit": 1,
+      "address": 1,
+      "value": 1
+    },
+    "factory/alarm/ack": {
+      "handler": "modbus",
+      "host": "127.0.0.1",
+      "port": 502,
+      "unit": 1,
+      "address": 2,
+      "value": 1
+    },
+    "factory/alarm/cancel": {
+      "handler": "modbus",
+      "host": "127.0.0.1",
+      "port": 502,
+      "unit": 1,
+      "address": 3,
+      "value": 1
+    },
+    "factory/evacuation/start": {
+      "handler": "gpio",
+      "pin": 18,
+      "value": 1
+    },
+    "factory/evacuation/stop": {
+      "handler": "gpio",
+      "pin": 18,
+      "value": 0
+    },
+    "factory/announcement/pressure_alert": {
+      "handler": "modbus",
+      "host": "127.0.0.1",
+      "port": 502,
+      "unit": 1,
+      "address": 4,
+      "value": 1
+    },
+    "factory/announcement/fire_alert": {
+      "handler": "modbus",
+      "host": "127.0.0.1",
+      "port": 502,
+      "unit": 1,
+      "address": 5,
+      "value": 1
+    }
+  }
+}

@@ -237,79 +237,24 @@ def test_orchestrator_invalid_stt_json_returns_502():
             raise AssertionError("Invalid STT JSON must return HTTP 502")
 
 
-def test_alert_lifecycle_trigger_ack_close():
-    with (
-        mock.patch("app.services.orchestrator_api.publish_command"),
-        mock.patch("app.services.orchestrator_api._emit_tts_message"),
-    ):
-        with orchestrator_api.alerts_lock:
-            snapshot = dict(orchestrator_api.alerts_store)
-            orchestrator_api.alerts_store.clear()
-        try:
-            created = orchestrator_api.trigger_alert(
-                orchestrator_api.AlertCreateRequest(
-                    message="Зафиксировано превышение давления в реакторе номер три",
-                    source="ggs-simulator",
-                    severity="critical",
-                    ack_timeout_seconds=30,
-                    auto_announce=True,
-                )
-            )
-            alert_id = str(created["alert_id"])
-            assert created["state"] == orchestrator_api.ALERT_STATE_ANNOUNCED
-            assert created["ack_deadline_at"] is not None
+def test_orchestrator_process_idempotency_key_avoids_duplicate_upstream_calls():
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
 
-            acked = orchestrator_api.acknowledge_alert(
-                alert_id,
-                orchestrator_api.AlertAckRequest(operator_id="op-1"),
-            )
-            assert acked["state"] == orchestrator_api.ALERT_STATE_ACKED
-            assert acked["acknowledged_by"] == "op-1"
+        def raise_for_status(self):
+            return None
 
-            closed = orchestrator_api.close_alert(
-                alert_id,
-                orchestrator_api.AlertCloseRequest(operator_id="op-1", reason="handled"),
-            )
-            assert closed["state"] == orchestrator_api.ALERT_STATE_CLOSED
-            assert closed["closed_by"] == "op-1"
-        finally:
-            with orchestrator_api.alerts_lock:
-                orchestrator_api.alerts_store.clear()
-                orchestrator_api.alerts_store.update(snapshot)
+        def json(self):
+            return self._payload
 
+    upload = types.SimpleNamespace(filename="sample.wav", file=io.BytesIO(b"wav-data"), content_type="audio/wav")
+    orchestrator_api.reset_state_for_tests()
+    with mock.patch("app.services.orchestrator_api.http_client.post") as post_mock:
+        post_mock.side_effect = [FakeResponse({"text": "неизвестная команда"}), FakeResponse({"status": "ok"})]
+        first = orchestrator_api.process_audio(upload, idempotency_key="process-key-1")
+        upload.file.seek(0)
+        second = orchestrator_api.process_audio(upload, idempotency_key="process-key-1")
 
-def test_alert_auto_escalates_after_ack_timeout():
-    with (
-        mock.patch("app.services.orchestrator_api.publish_command"),
-        mock.patch("app.services.orchestrator_api._emit_tts_message"),
-    ):
-        with orchestrator_api.alerts_lock:
-            snapshot = dict(orchestrator_api.alerts_store)
-            orchestrator_api.alerts_store.clear()
-        try:
-            created = orchestrator_api.trigger_alert(
-                orchestrator_api.AlertCreateRequest(
-                    message="Аварийное оповещение",
-                    source="ggs-simulator",
-                    severity="high",
-                    ack_timeout_seconds=5,
-                    auto_announce=True,
-                )
-            )
-            alert_id = str(created["alert_id"])
-
-            with orchestrator_api.alerts_lock:
-                alert = orchestrator_api.alerts_store[alert_id]
-                alert.ack_deadline_at = orchestrator_api._current_time() - 1
-
-            escalated = orchestrator_api._refresh_alerts()
-            assert any(item.alert_id == alert_id for item in escalated)
-
-            with orchestrator_api.alerts_lock:
-                updated = orchestrator_api.alerts_store[alert_id]
-                assert updated.state == orchestrator_api.ALERT_STATE_ESCALATED
-                assert updated.escalation_level == 1
-        finally:
-            with orchestrator_api.alerts_lock:
-                orchestrator_api.alerts_store.clear()
-                orchestrator_api.alerts_store.update(snapshot)
+    assert first == second
+    assert post_mock.call_count == 2

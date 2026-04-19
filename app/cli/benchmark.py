@@ -15,7 +15,7 @@ from app.commands.registry import (
     resolve_command_with_score,
     response_text_for_command,
 )
-from app.core.speech import create_recognizer, create_tts_engine, run_diagnostics
+from app.core.speech import VoskRecognizer, build_tts_engine, run_diagnostics
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -42,6 +42,32 @@ class MetricSummary:
 def load_phrase_cases(path: str | Path) -> list[PhraseCase]:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     return [PhraseCase(text=item["text"], expected_command=item.get("expected_command")) for item in raw]
+
+
+def word_error_rate(expected_text: str, actual_text: str) -> float:
+    expected = [token for token in expected_text.strip().lower().split() if token]
+    actual = [token for token in actual_text.strip().lower().split() if token]
+    if not expected:
+        return 0.0 if not actual else 1.0
+
+    rows = len(expected) + 1
+    cols = len(actual) + 1
+    dp = [[0 for _ in range(cols)] for _ in range(rows)]
+
+    for i in range(rows):
+        dp[i][0] = i
+    for j in range(cols):
+        dp[0][j] = j
+
+    for i in range(1, rows):
+        for j in range(1, cols):
+            substitution_cost = 0 if expected[i - 1] == actual[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + substitution_cost,
+            )
+    return dp[-1][-1] / len(expected)
 
 
 def percentile(sorted_values: list[float], ratio: float) -> float:
@@ -191,7 +217,7 @@ def benchmark_phrase_set(cases: list[PhraseCase]) -> dict[str, object]:
 
 def benchmark_tts(messages: list[str], output_dir: Path) -> dict[str, object]:
     try:
-        engine = create_tts_engine()
+        engine = build_tts_engine()
     except (FileNotFoundError, RuntimeError) as exc:
         return {"status": "skipped", "reason": str(exc)}
     target_dir = output_dir / "tts"
@@ -230,7 +256,8 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
     recognizer = create_recognizer()
     latencies_ms: list[float] = []
     mismatches: list[dict[str, str]] = []
-    error_pairs: list[tuple[str, str]] = []
+    total_ref_words = 0
+    total_word_edits = 0.0
     tracemalloc.start()
     wall_start = time.perf_counter()
     cpu_start = time.process_time()
@@ -238,16 +265,23 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
         started = time.perf_counter()
         result = recognizer.transcribe_from_wav(item["wav_path"])
         latencies_ms.append((time.perf_counter() - started) * 1000)
-        expected = _normalize_text(item["expected_text"])
-        actual = _normalize_text(result.text if result.success else "")
-        error_pairs.append((expected, actual))
-        if actual != expected:
+        actual = result.text if result.success else ""
+        expected_text = item["expected_text"]
+        ref_words = [token for token in expected_text.strip().split() if token]
+        if ref_words:
+            case_wer = word_error_rate(expected_text, actual)
+            total_ref_words += len(ref_words)
+            total_word_edits += case_wer * len(ref_words)
+        else:
+            case_wer = 0.0
+        if actual != item["expected_text"]:
             mismatches.append(
                 {
                     "wav_path": item["wav_path"],
                     "expected_text": expected,
                     "actual_text": actual,
                     "error": result.error or "",
+                    "wer": round(case_wer, 4),
                 }
             )
     process_time_seconds = time.process_time() - cpu_start
@@ -255,12 +289,13 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
     _, peak_memory_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     accuracy = ((len(wav_cases) - len(mismatches)) / len(wav_cases) * 100) if wav_cases else 0.0
-    error_summary = summarize_error_rates(error_pairs)
+    wer_percent = (total_word_edits / total_ref_words * 100) if total_ref_words > 0 else 0.0
     return {
         "status": "ok",
         "backend": getattr(recognizer, "backend_name", recognizer.__class__.__name__),
         "cases_total": len(wav_cases),
         "accuracy_percent": round(accuracy, 2),
+        "wer_percent": round(wer_percent, 2),
         "summary": asdict(summarize_measurements(latencies_ms, process_time_seconds, wall_time_seconds, peak_memory_bytes)),
         **error_summary,
         "mismatches": mismatches,

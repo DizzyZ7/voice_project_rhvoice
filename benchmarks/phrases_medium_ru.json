@@ -1,0 +1,8 @@
+[
+  {"text": "пожалуйста включи свет в цехе", "expected_command": "turn_on_light", "approx_duration_sec": 4},
+  {"text": "нужно выключить свет срочно", "expected_command": "turn_off_light", "approx_duration_sec": 4},
+  {"text": "сколько градусов в помещении", "expected_command": "get_temperature", "approx_duration_sec": 4},
+  {"text": "оператор подтверждает тревогу", "expected_command": "acknowledge_alarm", "approx_duration_sec": 4},
+  {"text": "объяви пожарную тревогу в производственном цехе", "expected_command": "announce_fire_alert", "approx_duration_sec": 5},
+  {"text": "запустить эвакуацию", "expected_command": "start_evacuation", "approx_duration_sec": 3}
+]

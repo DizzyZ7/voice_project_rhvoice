@@ -11,27 +11,29 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from prometheus_client import Counter, Histogram, start_http_server
 
 from app.core.security import InMemoryRateLimiter, RateLimitConfig, require_api_token
-from app.core.speech import STTResult, SpeechRecognizer, create_recognizer
+from app.core.speech import STTResult, build_stt_recognizer
 
 
 STT_REQUESTS_TOTAL = Counter("stt_requests_total", "Total number of speech-to-text requests")
 STT_ERRORS_TOTAL = Counter("stt_errors_total", "Total number of speech-to-text errors")
+STT_VAD_REJECTS_TOTAL = Counter("stt_vad_rejects_total", "Total requests rejected by VAD gate")
 STT_LATENCY_SECONDS = Histogram(
     "stt_latency_seconds",
     "Latency of speech-to-text requests",
     buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
 
-recognizer: Optional[SpeechRecognizer] = None
+recognizer: Optional[object] = None
 MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(2 * 1024 * 1024)))
 RATE_LIMITER = InMemoryRateLimiter(RateLimitConfig(requests=60, window_seconds=60))
+STT_BACKEND = os.environ.get("STT_BACKEND", "vosk")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
     global recognizer
-    recognizer = create_recognizer()
+    recognizer = build_stt_recognizer(STT_BACKEND)
     start_http_server(9101)
     yield
 
@@ -77,6 +79,8 @@ def recognise_audio(
         result: STTResult = recognizer.transcribe_from_wav(temp_path)
         if not result.success:
             STT_ERRORS_TOTAL.inc()
+            if result.error and "VAD" in result.error:
+                STT_VAD_REJECTS_TOTAL.inc()
             raise HTTPException(status_code=400, detail=result.error or "STT failed")
         return {"text": result.text, "success": True, "confidence": result.confidence}
     except HTTPException:

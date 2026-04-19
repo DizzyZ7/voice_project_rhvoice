@@ -1,42 +1,45 @@
 [
-  {
-    "text": "включи свет",
-    "expected_command": "turn_on_light"
-  },
-  {
-    "text": "пожалуйста включи свет в цехе",
-    "expected_command": "turn_on_light"
-  },
-  {
-    "text": "выключи свет",
-    "expected_command": "turn_off_light"
-  },
-  {
-    "text": "нужно выключить свет срочно",
-    "expected_command": "turn_off_light"
-  },
-  {
-    "text": "какая температура",
-    "expected_command": "get_temperature"
-  },
-  {
-    "text": "сколько градусов в помещении",
-    "expected_command": "get_temperature"
-  },
-  {
-    "text": "зажги свет",
-    "expected_command": "turn_on_light"
-  },
-  {
-    "text": "потуши свет",
-    "expected_command": "turn_off_light"
-  },
-  {
-    "text": "открой ворота",
-    "expected_command": null
-  },
-  {
-    "text": "поставь музыку",
-    "expected_command": null
-  }
+  {"text": "включи свет", "expected_command": "turn_on_light"},
+  {"text": "включить свет", "expected_command": "turn_on_light"},
+  {"text": "зажги свет", "expected_command": "turn_on_light"},
+  {"text": "пожалуйста включи свет в цехе", "expected_command": "turn_on_light"},
+
+  {"text": "выключи свет", "expected_command": "turn_off_light"},
+  {"text": "выключить свет", "expected_command": "turn_off_light"},
+  {"text": "потуши свет", "expected_command": "turn_off_light"},
+  {"text": "нужно выключить свет срочно", "expected_command": "turn_off_light"},
+
+  {"text": "какая температура", "expected_command": "get_temperature"},
+  {"text": "температура", "expected_command": "get_temperature"},
+  {"text": "сколько градусов", "expected_command": "get_temperature"},
+  {"text": "сколько градусов в помещении", "expected_command": "get_temperature"},
+
+  {"text": "подтвердить тревогу", "expected_command": "acknowledge_alarm"},
+  {"text": "принять тревогу", "expected_command": "acknowledge_alarm"},
+  {"text": "оператор подтверждает тревогу", "expected_command": "acknowledge_alarm"},
+
+  {"text": "отмена тревоги", "expected_command": "cancel_alarm"},
+  {"text": "сброс тревоги", "expected_command": "cancel_alarm"},
+  {"text": "снять тревогу", "expected_command": "cancel_alarm"},
+
+  {"text": "включить эвакуационное оповещение", "expected_command": "start_evacuation"},
+  {"text": "запустить эвакуацию", "expected_command": "start_evacuation"},
+  {"text": "объяви немедленную эвакуацию персонала из зоны номер три", "expected_command": "start_evacuation"},
+
+  {"text": "остановить эвакуационное оповещение", "expected_command": "stop_evacuation"},
+  {"text": "отбой эвакуации", "expected_command": "stop_evacuation"},
+  {"text": "отменить эвакуацию", "expected_command": "stop_evacuation"},
+
+  {"text": "объяви аварийное сообщение о превышении давления в реакторе номер три", "expected_command": "announce_pressure_alert"},
+  {"text": "зафиксировано превышение давления в реакторе номер три запустить оповещение", "expected_command": "announce_pressure_alert"},
+  {"text": "внимание объявить длинное аварийное оповещение о превышении давления и необходимости эвакуации персонала", "expected_command": "announce_pressure_alert"},
+
+  {"text": "объяви пожарную тревогу в производственном цехе", "expected_command": "announce_fire_alert"},
+  {"text": "внимание пожар в цехе номер два срочно запустить систему оповещения", "expected_command": "announce_fire_alert"},
+  {"text": "объяви длинное оповещение о пожаре в цехе номер два и необходимости немедленной эвакуации", "expected_command": "announce_fire_alert"},
+
+  {"text": "открой ворота", "expected_command": null},
+  {"text": "поставь музыку", "expected_command": null},
+  {"text": "закажи такси до проходной", "expected_command": null},
+  {"text": "добавь задачу в календарь", "expected_command": null}
 ]

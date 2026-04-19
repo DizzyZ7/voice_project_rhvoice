@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import threading
 import time
 import logging
 import threading
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 
 import requests
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from paho.mqtt.publish import single as mqtt_publish
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, start_http_server
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -25,6 +29,7 @@ from app.commands.registry import (
     response_text_for_command,
 )
 from app.core.security import InMemoryRateLimiter, RateLimitConfig, require_api_token
+from app.integrations import IntegrationRuntime
 
 STT_URL = os.environ.get("STT_URL", "http://stt-service:8000/stt/recognize")
 TTS_URL = os.environ.get("TTS_URL", "http://tts-service:8001/tts/generate")
@@ -35,10 +40,13 @@ MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(2 * 1024 * 1024)))
 RATE_LIMITER = InMemoryRateLimiter(RateLimitConfig(requests=60, window_seconds=60))
 UPSTREAM_TIMEOUT_SECONDS = float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "15"))
 VOICE_API_TOKEN = os.environ.get("VOICE_API_TOKEN", "dev-token-change-me")
-ALERT_ACK_TIMEOUT_SECONDS = int(os.environ.get("ALERT_ACK_TIMEOUT_SECONDS", "30"))
-ALERT_MAX_ESCALATION_LEVEL = int(os.environ.get("ALERT_MAX_ESCALATION_LEVEL", "2"))
-ALERT_TOPIC_PREFIX = os.environ.get("ALERT_TOPIC_PREFIX", "factory/alerts").strip().strip("/")
-logger = logging.getLogger("orchestrator")
+COMMAND_TRANSPORT = os.environ.get("COMMAND_TRANSPORT", "local").strip().lower()
+ALERT_DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("ALERT_DEFAULT_TIMEOUT_SECONDS", "30"))
+ORC_HTTP_TRUST_ENV = os.environ.get("ORC_HTTP_TRUST_ENV", "").strip().lower() in {"1", "true", "yes", "on"}
+BASE_DIR = Path(__file__).resolve().parents[2]
+ORC_DB_PATH = Path(os.environ.get("ORC_DB_PATH", str(BASE_DIR / "data" / "orchestrator.db"))).resolve()
+ORC_IDEMPOTENCY_TTL_SECONDS = int(os.environ.get("ORC_IDEMPOTENCY_TTL_SECONDS", "3600"))
+INTEGRATION_STRICT = os.environ.get("INTEGRATION_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 ORC_REQUESTS_TOTAL = Counter("orc_requests_total", "Total /process requests")
 ORC_ERRORS_TOTAL = Counter("orc_errors_total", "Total orchestrator errors")
@@ -57,6 +65,7 @@ ORC_TTS_LATENCY_SECONDS = Histogram(
     "Latency of TTS service calls",
     buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
+ORC_ESCALATIONS_TOTAL = Counter("orc_escalations_total", "Total alert escalations")
 
 ALERTS_TOTAL = Counter("orc_alerts_total", "Total created alerts")
 ALERTS_ACTIVE = Gauge("orc_alerts_active", "Current active alerts")
@@ -132,40 +141,239 @@ class AlertCloseRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
+    _load_alerts_from_db()
     start_http_server(9103)
     yield
 
 
 app = FastAPI(title="Orchestrator Service", version="1.0", lifespan=lifespan)
-http_client = requests.Session()
-http_client.mount(
-    "http://",
-    HTTPAdapter(
+
+
+def build_http_client(trust_env: bool = ORC_HTTP_TRUST_ENV) -> requests.Session:
+    client = requests.Session()
+    client.trust_env = trust_env
+    adapter = HTTPAdapter(
         max_retries=Retry(
             total=2,
             backoff_factor=0.2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=frozenset({"POST"}),
         )
-    ),
-)
-http_client.mount(
-    "https://",
-    HTTPAdapter(
-        max_retries=Retry(
-            total=2,
-            backoff_factor=0.2,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=frozenset({"POST"}),
-        )
-    ),
-)
-alerts_store: dict[str, AlertRecord] = {}
-alerts_lock = threading.Lock()
+    )
+    client.mount("http://", adapter)
+    client.mount("https://", adapter)
+    return client
+
+
+http_client = build_http_client()
+
+
+@dataclass
+class AlertState:
+    alert_id: str
+    message: str
+    created_at: float
+    timeout_seconds: int
+    acknowledged: bool = False
+    acknowledged_by: str | None = None
+    escalated: bool = False
+
+
+class AlertRaiseRequest(BaseModel):
+    message: str
+    timeout_seconds: int = ALERT_DEFAULT_TIMEOUT_SECONDS
+
+
+class AlertAckRequest(BaseModel):
+    operator_id: str
+
+
+ALERTS: dict[str, AlertState] = {}
+ALERT_LOCK = threading.Lock()
+DB_LOCK = threading.Lock()
+LOCAL_COMMAND_EVENTS: list[dict[str, str]] = []
+_ALERT_COUNTER = 0
+integration_runtime = IntegrationRuntime()
+
+
+def _db_connect() -> sqlite3.Connection:
+    ORC_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(ORC_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_storage() -> None:
+    with DB_LOCK:
+        with _db_connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alerts (
+                    alert_id TEXT PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    timeout_seconds INTEGER NOT NULL,
+                    acknowledged INTEGER NOT NULL,
+                    acknowledged_by TEXT,
+                    escalated INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS idempotency (
+                    scope TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (scope, idempotency_key)
+                )
+                """
+            )
+            conn.commit()
+
+
+def _row_to_alert(row: sqlite3.Row) -> AlertState:
+    return AlertState(
+        alert_id=row["alert_id"],
+        message=row["message"],
+        created_at=float(row["created_at"]),
+        timeout_seconds=int(row["timeout_seconds"]),
+        acknowledged=bool(row["acknowledged"]),
+        acknowledged_by=row["acknowledged_by"],
+        escalated=bool(row["escalated"]),
+    )
+
+
+def _load_alerts_from_db() -> None:
+    global _ALERT_COUNTER
+    _init_storage()
+    with DB_LOCK:
+        with _db_connect() as conn:
+            rows = conn.execute("SELECT * FROM alerts").fetchall()
+    alerts = {_row_to_alert(row).alert_id: _row_to_alert(row) for row in rows}
+    with ALERT_LOCK:
+        ALERTS.clear()
+        ALERTS.update(alerts)
+        max_id = 0
+        for alert_id in ALERTS:
+            if alert_id.startswith("alert-"):
+                tail = alert_id.split("-", 1)[1]
+                if tail.isdigit():
+                    max_id = max(max_id, int(tail))
+        _ALERT_COUNTER = max_id
+
+
+def _persist_alert(alert: AlertState) -> None:
+    with DB_LOCK:
+        with _db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO alerts (alert_id, message, created_at, timeout_seconds, acknowledged, acknowledged_by, escalated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alert_id) DO UPDATE SET
+                    message=excluded.message,
+                    created_at=excluded.created_at,
+                    timeout_seconds=excluded.timeout_seconds,
+                    acknowledged=excluded.acknowledged,
+                    acknowledged_by=excluded.acknowledged_by,
+                    escalated=excluded.escalated
+                """,
+                (
+                    alert.alert_id,
+                    alert.message,
+                    alert.created_at,
+                    alert.timeout_seconds,
+                    int(alert.acknowledged),
+                    alert.acknowledged_by,
+                    int(alert.escalated),
+                ),
+            )
+            conn.commit()
+
+
+def _get_idempotent_response(scope: str, idempotency_key: str) -> dict[str, str | int] | None:
+    now = time.time()
+    with DB_LOCK:
+        with _db_connect() as conn:
+            row = conn.execute(
+                "SELECT response_json, created_at FROM idempotency WHERE scope=? AND idempotency_key=?",
+                (scope, idempotency_key),
+            ).fetchone()
+            if row is None:
+                return None
+            age = now - float(row["created_at"])
+            if age > ORC_IDEMPOTENCY_TTL_SECONDS:
+                conn.execute("DELETE FROM idempotency WHERE scope=? AND idempotency_key=?", (scope, idempotency_key))
+                conn.commit()
+                return None
+            return json.loads(row["response_json"])
+
+
+def _save_idempotent_response(scope: str, idempotency_key: str, response: dict[str, str | int]) -> None:
+    with DB_LOCK:
+        with _db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO idempotency (scope, idempotency_key, response_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(scope, idempotency_key) DO UPDATE SET
+                    response_json=excluded.response_json,
+                    created_at=excluded.created_at
+                """,
+                (scope, idempotency_key, json.dumps(response, ensure_ascii=False), time.time()),
+            )
+            conn.commit()
+
+
+def _normalize_idempotency_key(value: object) -> str | None:
+    if isinstance(value, str):
+        key = value.strip()
+        return key or None
+    return None
+
+
+def reset_state_for_tests() -> None:
+    global _ALERT_COUNTER
+    _init_storage()
+    with DB_LOCK:
+        with _db_connect() as conn:
+            conn.execute("DELETE FROM alerts")
+            conn.execute("DELETE FROM idempotency")
+            conn.commit()
+    with ALERT_LOCK:
+        ALERTS.clear()
+        _ALERT_COUNTER = 0
+    LOCAL_COMMAND_EVENTS.clear()
+
+
+def _next_alert_id() -> str:
+    global _ALERT_COUNTER
+    _ALERT_COUNTER += 1
+    return f"alert-{_ALERT_COUNTER}"
+
+
+def _sweep_alerts() -> None:
+    now = time.time()
+    escalated_ids: list[str] = []
+    with ALERT_LOCK:
+        for alert in ALERTS.values():
+            if alert.acknowledged or alert.escalated:
+                continue
+            if now - alert.created_at >= alert.timeout_seconds:
+                alert.escalated = True
+                escalated_ids.append(alert.alert_id)
+    for alert_id in escalated_ids:
+        _persist_alert(ALERTS[alert_id])
+        ORC_ESCALATIONS_TOTAL.inc()
+
+
+_load_alerts_from_db()
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    _sweep_alerts()
     return {"status": "ok"}
 
 
@@ -190,96 +398,17 @@ def publish_command(topic: str, payload: str | None = None) -> None:
     mqtt_publish(topic, payload or "1", hostname=MQTT_HOST, port=MQTT_PORT, auth=auth, tls=tls)
 
 
-def _current_time() -> float:
-    return time.time()
-
-
-def _update_active_alert_metric() -> None:
-    with alerts_lock:
-        active = sum(1 for item in alerts_store.values() if item.state in ALERT_ACTIVE_STATES)
-    ALERTS_ACTIVE.set(active)
-
-
-def _publish_alert_event(event: str, alert: AlertRecord) -> None:
-    topic = f"{ALERT_TOPIC_PREFIX}/{event}"
-    payload = json.dumps(
-        {
-            "alert_id": alert.alert_id,
-            "state": alert.state,
-            "severity": alert.severity,
-            "message": alert.message,
-            "source": alert.source,
-            "escalation_level": alert.escalation_level,
-            "timestamp": _current_time(),
-        },
-        ensure_ascii=False,
-    )
-    publish_command(topic, payload=payload)
-
-
-def _emit_tts_message(text: str, strict: bool = True) -> None:
-    tts_start = time.perf_counter()
-    try:
-        headers = {"Authorization": f"Bearer {VOICE_API_TOKEN}"}
-        response = http_client.post(
-            TTS_URL,
-            json={"text": text},
-            timeout=UPSTREAM_TIMEOUT_SECONDS,
-            headers=headers,
-        )
-        response.raise_for_status()
-    except Exception as exc:
-        ORC_ERRORS_TOTAL.inc()
-        if strict:
-            raise HTTPException(status_code=502, detail=f"TTS service error: {exc}")
-        logger.warning("TTS announcement skipped due to error: %s", exc)
-    finally:
-        ORC_TTS_LATENCY_SECONDS.observe(time.perf_counter() - tts_start)
-
-
-def _build_ack_prompt(alert: AlertRecord) -> str:
-    return f"Тревога. {alert.message}. Требуется подтверждение оператора."
-
-
-def _announce_alert(alert: AlertRecord, announce: bool = True, strict_tts: bool = False) -> None:
-    _publish_alert_event("announced", alert)
-    if announce:
-        _emit_tts_message(_build_ack_prompt(alert), strict=strict_tts)
-
-
-def _refresh_alerts(now: float | None = None) -> list[AlertRecord]:
-    check_time = now or _current_time()
-    escalated: list[AlertRecord] = []
-    with alerts_lock:
-        for alert in alerts_store.values():
-            if alert.state not in {ALERT_STATE_ANNOUNCED, ALERT_STATE_ESCALATED}:
-                continue
-            if not alert.ack_deadline_at or check_time < alert.ack_deadline_at:
-                continue
-            if alert.escalation_level >= ALERT_MAX_ESCALATION_LEVEL:
-                alert.ack_deadline_at = None
-                alert.updated_at = check_time
-                continue
-
-            alert.escalation_level += 1
-            alert.state = ALERT_STATE_ESCALATED
-            alert.escalated_at = check_time
-            alert.updated_at = check_time
-            alert.ack_deadline_at = check_time + alert.ack_timeout_seconds
-            escalated.append(alert)
-
-    for alert in escalated:
-        ALERT_ESCALATIONS_TOTAL.inc()
-        try:
-            _publish_alert_event("escalated", alert)
-            _emit_tts_message(
-                f"Эскалация тревоги уровня {alert.escalation_level}. {alert.message}. Подтвердите получение.",
-                strict=False,
-            )
-        except Exception as exc:
-            logger.warning("Не удалось отправить событие эскалации %s: %s", alert.alert_id, exc)
-    _update_active_alert_metric()
-    return escalated
+def dispatch_command(topic: str, payload: str | None = None) -> None:
+    if COMMAND_TRANSPORT == "mqtt":
+        publish_command(topic, payload)
+        return
+    if COMMAND_TRANSPORT == "local":
+        LOCAL_COMMAND_EVENTS.append({"topic": topic, "payload": payload or "1"})
+        result = integration_runtime.execute_topic(topic, payload)
+        if not result.ok and INTEGRATION_STRICT:
+            raise RuntimeError(result.detail or "Integration dispatch failed")
+        return
+    raise RuntimeError(f"Unsupported COMMAND_TRANSPORT: {COMMAND_TRANSPORT}")
 
 
 class LimitedReader:
@@ -303,14 +432,20 @@ class LimitedReader:
 def process_audio(
     file: UploadFile = File(...),
     x_client_id: str | None = Header(default=None, alias="X-Client-Id"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, str | float | None]:
-    _refresh_alerts()
+) -> dict[str, str]:
+    _sweep_alerts()
+    idempotency_key = _normalize_idempotency_key(idempotency_key)
     ORC_REQUESTS_TOTAL.inc()
     client_key = x_client_id or "unknown"
     if not RATE_LIMITER.allow(client_key):
         ORC_ERRORS_TOTAL.inc()
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    if idempotency_key:
+        cached = _get_idempotent_response("process_audio", idempotency_key)
+        if cached is not None:
+            return {k: str(v) for k, v in cached.items()}
 
     stt_start = time.perf_counter()
     try:
@@ -339,47 +474,83 @@ def process_audio(
     if spec and confidence >= COMMAND_CONFIDENCE_THRESHOLD:
         ORC_COMMANDS_TOTAL.labels(command=spec.key).inc()
         try:
-            publish_command(spec.mqtt_topic)
+            dispatch_command(spec.mqtt_topic)
         except Exception as exc:
             ORC_ERRORS_TOTAL.inc()
-            raise HTTPException(status_code=502, detail=f"MQTT publish error: {exc}")
+            raise HTTPException(status_code=502, detail=f"Command dispatch error: {exc}")
 
-        response_text = response_text_for_command(spec.key, temperature_value=23)
-        _emit_tts_message(response_text, strict=True)
-        return {"text": recognised_text, "command": spec.key, "status": "ok", "confidence": stt_confidence}
+        tts_start = time.perf_counter()
+        try:
+            response_text = response_text_for_command(spec.key, temperature_value=23)
+            headers = {"Authorization": f"Bearer {VOICE_API_TOKEN}"}
+            tts_response = http_client.post(
+                TTS_URL,
+                json={"text": response_text},
+                timeout=UPSTREAM_TIMEOUT_SECONDS,
+                headers=headers,
+            )
+            tts_response.raise_for_status()
+        except Exception as exc:
+            ORC_ERRORS_TOTAL.inc()
+            raise HTTPException(status_code=502, detail=f"TTS service error: {exc}")
+        finally:
+            ORC_TTS_LATENCY_SECONDS.observe(time.perf_counter() - tts_start)
+        response_payload = {"text": recognised_text, "command": spec.key, "status": "ok"}
+        if idempotency_key:
+            _save_idempotent_response("process_audio", idempotency_key, response_payload)
+        return response_payload
 
-    _emit_tts_message(UNKNOWN_COMMAND_REPLY, strict=True)
-    return {"text": recognised_text, "command": "unknown", "status": "unknown", "confidence": stt_confidence}
+    tts_start = time.perf_counter()
+    try:
+        headers = {"Authorization": f"Bearer {VOICE_API_TOKEN}"}
+        tts_response = http_client.post(
+            TTS_URL,
+            json={"text": UNKNOWN_COMMAND_REPLY},
+            timeout=UPSTREAM_TIMEOUT_SECONDS,
+            headers=headers,
+        )
+        tts_response.raise_for_status()
+    except Exception as exc:
+        ORC_ERRORS_TOTAL.inc()
+        raise HTTPException(status_code=502, detail=f"TTS service error: {exc}")
+    finally:
+        ORC_TTS_LATENCY_SECONDS.observe(time.perf_counter() - tts_start)
+    response_payload = {"text": recognised_text, "command": "unknown", "status": "unknown"}
+    if idempotency_key:
+        _save_idempotent_response("process_audio", idempotency_key, response_payload)
+    return response_payload
 
 
-@app.post("/alerts/trigger")
-def trigger_alert(
-    request: AlertCreateRequest,
+@app.post("/alerts/raise")
+def raise_alert(
+    request: AlertRaiseRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, object]:
-    _refresh_alerts()
-    now = _current_time()
-    ack_timeout = request.ack_timeout_seconds or ALERT_ACK_TIMEOUT_SECONDS
-    alert = AlertRecord(
-        alert_id=uuid.uuid4().hex,
-        message=request.message.strip(),
-        severity=request.severity.strip().lower() or "high",
-        source=request.source.strip() or "ggs-simulator",
-        state=ALERT_STATE_ANNOUNCED if request.auto_announce else ALERT_STATE_NEW,
-        created_at=now,
-        updated_at=now,
-        ack_timeout_seconds=ack_timeout,
-        announced_at=now if request.auto_announce else None,
-        ack_deadline_at=(now + ack_timeout) if request.auto_announce else None,
-    )
-    with alerts_lock:
-        alerts_store[alert.alert_id] = alert
-    ALERTS_TOTAL.inc()
-    _publish_alert_event("created", alert)
-    if request.auto_announce:
-        _announce_alert(alert, announce=True, strict_tts=False)
-    _update_active_alert_metric()
-    return alert.to_dict()
+) -> dict[str, str | int]:
+    _sweep_alerts()
+    idempotency_key = _normalize_idempotency_key(idempotency_key)
+    if idempotency_key:
+        cached = _get_idempotent_response("alerts_raise", idempotency_key)
+        if cached is not None:
+            return cached
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Alert message is empty")
+    timeout_seconds = max(1, request.timeout_seconds)
+    with ALERT_LOCK:
+        alert_id = _next_alert_id()
+        created = AlertState(
+            alert_id=alert_id,
+            message=message,
+            created_at=time.time(),
+            timeout_seconds=timeout_seconds,
+        )
+        ALERTS[alert_id] = created
+    _persist_alert(created)
+    response_payload: dict[str, str | int] = {"alert_id": alert_id, "status": "pending", "timeout_seconds": timeout_seconds}
+    if idempotency_key:
+        _save_idempotent_response("alerts_raise", idempotency_key, response_payload)
+    return response_payload
 
 
 @app.post("/alerts/{alert_id}/ack")
@@ -387,77 +558,40 @@ def acknowledge_alert(
     alert_id: str,
     request: AlertAckRequest,
     _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, object]:
-    _refresh_alerts()
-    now = _current_time()
-    with alerts_lock:
-        alert = alerts_store.get(alert_id)
+) -> dict[str, str]:
+    _sweep_alerts()
+    persisted_alert: AlertState | None = None
+    with ALERT_LOCK:
+        alert = ALERTS.get(alert_id)
         if alert is None:
-            raise HTTPException(status_code=404, detail=f"Alert not found: {alert_id}")
-        if alert.state == ALERT_STATE_CLOSED:
-            raise HTTPException(status_code=409, detail=f"Alert already closed: {alert_id}")
-        alert.state = ALERT_STATE_ACKED
-        alert.acknowledged_by = request.operator_id.strip()
-        alert.acknowledged_at = now
-        alert.ack_deadline_at = None
-        alert.updated_at = now
-
-    _publish_alert_event("acknowledged", alert)
-    _emit_tts_message(f"Тревога {alert.alert_id} подтверждена оператором {alert.acknowledged_by}.", strict=False)
-    _update_active_alert_metric()
-    return alert.to_dict()
+            raise HTTPException(status_code=404, detail="Alert not found")
+        if alert.escalated:
+            raise HTTPException(status_code=409, detail="Alert already escalated")
+        alert.acknowledged = True
+        alert.acknowledged_by = request.operator_id.strip() or "unknown"
+        persisted_alert = alert
+    if persisted_alert is not None:
+        _persist_alert(persisted_alert)
+    return {"alert_id": alert_id, "status": "acknowledged"}
 
 
-@app.post("/alerts/{alert_id}/close")
-def close_alert(
-    alert_id: str,
-    request: AlertCloseRequest,
+@app.get("/alerts/pending")
+def list_pending_alerts(
     _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, object]:
-    _refresh_alerts()
-    now = _current_time()
-    with alerts_lock:
-        alert = alerts_store.get(alert_id)
-        if alert is None:
-            raise HTTPException(status_code=404, detail=f"Alert not found: {alert_id}")
-        if alert.state == ALERT_STATE_CLOSED:
-            return alert.to_dict()
-        alert.state = ALERT_STATE_CLOSED
-        alert.closed_by = request.operator_id.strip()
-        alert.closed_at = now
-        alert.close_reason = request.reason
-        alert.ack_deadline_at = None
-        alert.updated_at = now
-
-    _publish_alert_event("closed", alert)
-    _emit_tts_message(f"Тревога {alert.alert_id} закрыта оператором {alert.closed_by}.", strict=False)
-    _update_active_alert_metric()
-    return alert.to_dict()
-
-
-@app.get("/alerts/{alert_id}")
-def get_alert(
-    alert_id: str,
-    _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, object]:
-    _refresh_alerts()
-    with alerts_lock:
-        alert = alerts_store.get(alert_id)
-        if alert is None:
-            raise HTTPException(status_code=404, detail=f"Alert not found: {alert_id}")
-        return alert.to_dict()
-
-
-@app.get("/alerts")
-def list_alerts(
-    state: str | None = None,
-    _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, object]:
-    _refresh_alerts()
-    desired_state = state.strip().upper() if state else None
-    with alerts_lock:
-        items = [item.to_dict() for item in alerts_store.values()]
-    if desired_state:
-        items = [item for item in items if item["state"] == desired_state]
-    items.sort(key=lambda item: float(item["created_at"]), reverse=True)
-    return {"count": len(items), "items": items}
+) -> dict[str, list[dict[str, str | int | bool | float | None]]]:
+    _sweep_alerts()
+    with ALERT_LOCK:
+        payload = [
+            {
+                "alert_id": alert.alert_id,
+                "message": alert.message,
+                "created_at": alert.created_at,
+                "timeout_seconds": alert.timeout_seconds,
+                "acknowledged": alert.acknowledged,
+                "acknowledged_by": alert.acknowledged_by,
+                "escalated": alert.escalated,
+            }
+            for alert in ALERTS.values()
+            if not alert.acknowledged
+        ]
+    return {"alerts": payload}

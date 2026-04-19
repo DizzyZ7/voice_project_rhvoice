@@ -1,0 +1,32 @@
+[
+  {
+    "text": "объяви аварийное сообщение о превышении давления в реакторе номер три",
+    "expected_command": "announce_pressure_alert",
+    "approx_duration_sec": 8
+  },
+  {
+    "text": "зафиксировано превышение давления в реакторе номер три запустить оповещение",
+    "expected_command": "announce_pressure_alert",
+    "approx_duration_sec": 9
+  },
+  {
+    "text": "внимание пожар в цехе номер два срочно запустить систему оповещения",
+    "expected_command": "announce_fire_alert",
+    "approx_duration_sec": 9
+  },
+  {
+    "text": "объяви длинное оповещение о пожаре в цехе номер два и необходимости немедленной эвакуации",
+    "expected_command": "announce_fire_alert",
+    "approx_duration_sec": 12
+  },
+  {
+    "text": "внимание объявить длинное аварийное оповещение о превышении давления и необходимости эвакуации персонала",
+    "expected_command": "announce_pressure_alert",
+    "approx_duration_sec": 12
+  },
+  {
+    "text": "объяви немедленную эвакуацию персонала из зоны номер три",
+    "expected_command": "start_evacuation",
+    "approx_duration_sec": 7
+  }
+]
