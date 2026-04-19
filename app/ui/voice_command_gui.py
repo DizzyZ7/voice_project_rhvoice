@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from app.commands import runtime as service
-from app.core.speech import RHVoiceTTS, VoskRecognizer, run_diagnostics, setup_logger
+from app.core.speech import create_recognizer, create_tts_engine, run_diagnostics, setup_logger
 
 logger = setup_logger("voice_gui", "voice_gui.log")
 
@@ -14,15 +14,15 @@ logger = setup_logger("voice_gui", "voice_gui.log")
 class VoiceCommandGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Голосовой сервис | Vosk + RHVoice")
+        self.root.title("Голосовой сервис | STT + TTS")
         self.root.geometry("700x420")
         self.queue: queue.Queue[str] = queue.Queue()
         self.stop_event = threading.Event()
         self.listener_thread: threading.Thread | None = None
 
         try:
-            self.recognizer = VoskRecognizer(logger=logger)
-            self.tts = RHVoiceTTS(logger=logger)
+            self.recognizer = create_recognizer(logger=logger)
+            self.tts = create_tts_engine(logger=logger)
         except Exception as exc:
             messagebox.showerror("Ошибка запуска", str(exc))
             raise
@@ -67,7 +67,9 @@ class VoiceCommandGUI:
     def refresh_diagnostics(self):
         diag = run_diagnostics()
         msg = (
+            f"STT backend: {diag.stt_backend} ({'OK' if diag.stt_backend_available else 'НЕТ'}) | "
             f"Vosk model: {'OK' if diag.vosk_model_exists else 'НЕТ'} | "
+            f"TTS backend: {diag.tts_backend} ({'OK' if diag.tts_backend_available else 'НЕТ'}) | "
             f"RHVoice: {(diag.rhvoice_backend + ':' + (diag.rhvoice_target or '-')) if diag.rhvoice_available else 'не найден'} | "
             f"sounddevice: {'OK' if diag.sounddevice_available else 'не установлен'}"
         )

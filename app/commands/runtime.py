@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.commands.registry import DONE_REPLY, STOP_REPLY, UNKNOWN_COMMAND_REPLY, resolve_command, should_stop
-from app.core.speech import RHVoiceTTS, VoskRecognizer, run_diagnostics, setup_logger
+from app.core.speech import SpeechSynthesizer, create_recognizer, create_tts_engine, run_diagnostics, setup_logger
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 logger = setup_logger("voice_service", "voice_service.log")
@@ -21,18 +21,18 @@ def turn_off_light() -> None:
     logger.info("[ACTION] Выключение света")
 
 
-def get_temperature(tts: RHVoiceTTS) -> None:
+def get_temperature(tts: SpeechSynthesizer) -> None:
     temperature = 23.5
     logger.info("[ACTION] Температура: %.1f", temperature)
     tts.speak(f"Сейчас температура {temperature} градусов")
 
 
-def unknown_command(command: str, tts: RHVoiceTTS) -> None:
+def unknown_command(command: str, tts: SpeechSynthesizer) -> None:
     logger.warning("Неизвестная команда: %s", command)
     tts.speak(UNKNOWN_COMMAND_REPLY)
 
 
-def parse_and_execute(command: str, tts: RHVoiceTTS) -> bool:
+def parse_and_execute(command: str, tts: SpeechSynthesizer) -> bool:
     if not command:
         logger.info("Пустая команда")
         return True
@@ -60,7 +60,7 @@ def parse_and_execute(command: str, tts: RHVoiceTTS) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Офлайн голосовой сервис на Vosk + RHVoice")
+    parser = argparse.ArgumentParser(description="Офлайн голосовой сервис на STT backend + RHVoice")
     parser.add_argument("--timeout", type=int, default=4, help="Длина окна записи с микрофона в секундах")
     parser.add_argument("--once", action="store_true", help="Считать одну команду и завершиться")
     args = parser.parse_args()
@@ -75,8 +75,8 @@ def main() -> None:
         diagnostics.sounddevice_available,
     )
 
-    recognizer = VoskRecognizer()
-    tts = RHVoiceTTS(logger=logger)
+    recognizer = create_recognizer(logger=logger)
+    tts = create_tts_engine(logger=logger)
     logger.info("Сервис запущен")
 
     while True:

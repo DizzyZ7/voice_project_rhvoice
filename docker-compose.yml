@@ -16,7 +16,11 @@ services:
     image: voice_stt_service:latest
     container_name: stt_service
     environment:
+      - STT_BACKEND=${STT_BACKEND:-vosk}
       - VOSK_MODEL_PATH=/models/vosk-model-small-ru-0.22
+      - FASTER_WHISPER_MODEL=${FASTER_WHISPER_MODEL:-small}
+      - FASTER_WHISPER_DEVICE=${FASTER_WHISPER_DEVICE:-cpu}
+      - FASTER_WHISPER_COMPUTE_TYPE=${FASTER_WHISPER_COMPUTE_TYPE:-int8}
       - VOICE_API_TOKEN=${VOICE_API_TOKEN:-change-me-in-prod}
       - MAX_AUDIO_BYTES=2097152
     volumes:
@@ -35,7 +39,10 @@ services:
     image: voice_tts_service:latest
     container_name: tts_service
     environment:
+      - TTS_BACKEND=${TTS_BACKEND:-rhvoice}
       - RHVOICE_BIN=RHVoice-test
+      - PIPER_BIN=${PIPER_BIN:-piper}
+      - PIPER_MODEL_PATH=${PIPER_MODEL_PATH:-}
       - TTS_OUTPUT_DIR=/tmp/tts-output
       - VOICE_API_TOKEN=${VOICE_API_TOKEN:-change-me-in-prod}
       - MAX_TTS_TEXT_LENGTH=400
@@ -55,6 +62,10 @@ services:
     environment:
       - STT_URL=http://stt-service:8000/stt/recognize
       - TTS_URL=http://tts-service:8001/tts/generate
+      - COMMAND_TRANSPORT=${COMMAND_TRANSPORT:-mqtt}
+      - ALERT_ACK_TIMEOUT_SECONDS=${ALERT_ACK_TIMEOUT_SECONDS:-30}
+      - ALERT_MAX_ESCALATION_LEVEL=${ALERT_MAX_ESCALATION_LEVEL:-2}
+      - ALERT_TOPIC_PREFIX=${ALERT_TOPIC_PREFIX:-factory/alerts}
       - MQTT_HOST=mqtt-broker
       - MQTT_PORT=1883
       - VOICE_API_TOKEN=${VOICE_API_TOKEN:-change-me-in-prod}

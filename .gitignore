@@ -1,10 +1,12 @@
 .venv/
+.codex
 .idea/
 .pytest_cache/
 __pycache__/
 *.py[cod]
 
 logs/
+cache/
 tmp-tts-output/
 reports/tts/
 third_party/downloads/
