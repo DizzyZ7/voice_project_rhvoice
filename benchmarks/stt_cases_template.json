@@ -1,0 +1,14 @@
+[
+  {
+    "wav_path": "benchmarks/noise_cases/line_01_factory_fan_65db.wav",
+    "expected_text": "включи свет в первом цехе"
+  },
+  {
+    "wav_path": "benchmarks/noise_cases/line_02_ventilation_75db.wav",
+    "expected_text": "какая температура в реакторе номер три"
+  },
+  {
+    "wav_path": "benchmarks/noise_cases/line_03_machine_impacts_80db.wav",
+    "expected_text": "зафиксировано превышение давления в реакторе номер три"
+  }
+]

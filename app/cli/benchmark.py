@@ -15,7 +15,7 @@ from app.commands.registry import (
     resolve_command_with_score,
     response_text_for_command,
 )
-from app.core.speech import RHVoiceTTS, VoskRecognizer, run_diagnostics
+from app.core.speech import create_recognizer, create_tts_engine, run_diagnostics
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -54,6 +54,71 @@ def percentile(sorted_values: list[float], ratio: float) -> float:
     upper = min(lower + 1, len(sorted_values) - 1)
     weight = position - lower
     return sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def tokenize_words(value: str) -> list[str]:
+    return _normalize_text(value).split()
+
+
+def tokenize_chars(value: str) -> list[str]:
+    return list("".join(tokenize_words(value)))
+
+
+def levenshtein_distance(reference: list[str], hypothesis: list[str]) -> int:
+    if not reference:
+        return len(hypothesis)
+    if not hypothesis:
+        return len(reference)
+
+    previous = list(range(len(hypothesis) + 1))
+    for i, ref_item in enumerate(reference, start=1):
+        current = [i]
+        for j, hyp_item in enumerate(hypothesis, start=1):
+            deletion = previous[j] + 1
+            insertion = current[j - 1] + 1
+            substitution = previous[j - 1] + (0 if ref_item == hyp_item else 1)
+            current.append(min(deletion, insertion, substitution))
+        previous = current
+    return previous[-1]
+
+
+def summarize_error_rates(pairs: list[tuple[str, str]]) -> dict[str, float | int]:
+    ref_word_total = 0
+    hyp_word_total = 0
+    word_edits_total = 0
+    ref_char_total = 0
+    hyp_char_total = 0
+    char_edits_total = 0
+
+    for reference_text, hypothesis_text in pairs:
+        ref_words = tokenize_words(reference_text)
+        hyp_words = tokenize_words(hypothesis_text)
+        ref_chars = tokenize_chars(reference_text)
+        hyp_chars = tokenize_chars(hypothesis_text)
+
+        ref_word_total += len(ref_words)
+        hyp_word_total += len(hyp_words)
+        ref_char_total += len(ref_chars)
+        hyp_char_total += len(hyp_chars)
+        word_edits_total += levenshtein_distance(ref_words, hyp_words)
+        char_edits_total += levenshtein_distance(ref_chars, hyp_chars)
+
+    wer = (word_edits_total / ref_word_total * 100) if ref_word_total else 0.0
+    cer = (char_edits_total / ref_char_total * 100) if ref_char_total else 0.0
+    return {
+        "reference_words": ref_word_total,
+        "hypothesis_words": hyp_word_total,
+        "word_edits": word_edits_total,
+        "wer_percent": round(wer, 3),
+        "reference_chars": ref_char_total,
+        "hypothesis_chars": hyp_char_total,
+        "char_edits": char_edits_total,
+        "cer_percent": round(cer, 3),
+    }
 
 
 def summarize_measurements(
@@ -126,7 +191,7 @@ def benchmark_phrase_set(cases: list[PhraseCase]) -> dict[str, object]:
 
 def benchmark_tts(messages: list[str], output_dir: Path) -> dict[str, object]:
     try:
-        engine = RHVoiceTTS()
+        engine = create_tts_engine()
     except (FileNotFoundError, RuntimeError) as exc:
         return {"status": "skipped", "reason": str(exc)}
     target_dir = output_dir / "tts"
@@ -148,6 +213,7 @@ def benchmark_tts(messages: list[str], output_dir: Path) -> dict[str, object]:
     tracemalloc.stop()
     return {
         "status": "ok",
+        "backend": getattr(engine, "backend_name", engine.__class__.__name__),
         "messages_total": len(messages),
         "summary": asdict(summarize_measurements(latencies_ms, process_time_seconds, wall_time_seconds, peak_memory_bytes)),
         "generated_files": generated_files,
@@ -156,12 +222,15 @@ def benchmark_tts(messages: list[str], output_dir: Path) -> dict[str, object]:
 
 def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
     diagnostics = run_diagnostics()
-    if not diagnostics.vosk_model_exists:
+    if diagnostics.stt_backend == "vosk" and not diagnostics.vosk_model_exists:
         return {"status": "skipped", "reason": "Vosk model not found"}
+    if not diagnostics.stt_backend_available:
+        return {"status": "skipped", "reason": f"STT backend '{diagnostics.stt_backend}' is not available"}
 
-    recognizer = VoskRecognizer()
+    recognizer = create_recognizer()
     latencies_ms: list[float] = []
     mismatches: list[dict[str, str]] = []
+    error_pairs: list[tuple[str, str]] = []
     tracemalloc.start()
     wall_start = time.perf_counter()
     cpu_start = time.process_time()
@@ -169,12 +238,14 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
         started = time.perf_counter()
         result = recognizer.transcribe_from_wav(item["wav_path"])
         latencies_ms.append((time.perf_counter() - started) * 1000)
-        actual = result.text if result.success else ""
-        if actual != item["expected_text"]:
+        expected = _normalize_text(item["expected_text"])
+        actual = _normalize_text(result.text if result.success else "")
+        error_pairs.append((expected, actual))
+        if actual != expected:
             mismatches.append(
                 {
                     "wav_path": item["wav_path"],
-                    "expected_text": item["expected_text"],
+                    "expected_text": expected,
                     "actual_text": actual,
                     "error": result.error or "",
                 }
@@ -184,11 +255,14 @@ def benchmark_stt(wav_cases: list[dict[str, str]]) -> dict[str, object]:
     _, peak_memory_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     accuracy = ((len(wav_cases) - len(mismatches)) / len(wav_cases) * 100) if wav_cases else 0.0
+    error_summary = summarize_error_rates(error_pairs)
     return {
         "status": "ok",
+        "backend": getattr(recognizer, "backend_name", recognizer.__class__.__name__),
         "cases_total": len(wav_cases),
         "accuracy_percent": round(accuracy, 2),
         "summary": asdict(summarize_measurements(latencies_ms, process_time_seconds, wall_time_seconds, peak_memory_bytes)),
+        **error_summary,
         "mismatches": mismatches,
     }
 

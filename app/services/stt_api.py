@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from prometheus_client import Counter, Histogram, start_http_server
 
 from app.core.security import InMemoryRateLimiter, RateLimitConfig, require_api_token
-from app.core.speech import STTResult, VoskRecognizer
+from app.core.speech import STTResult, SpeechRecognizer, create_recognizer
 
 
 STT_REQUESTS_TOTAL = Counter("stt_requests_total", "Total number of speech-to-text requests")
@@ -22,7 +22,7 @@ STT_LATENCY_SECONDS = Histogram(
     buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
 
-recognizer: Optional[VoskRecognizer] = None
+recognizer: Optional[SpeechRecognizer] = None
 MAX_AUDIO_BYTES = int(os.environ.get("MAX_AUDIO_BYTES", str(2 * 1024 * 1024)))
 RATE_LIMITER = InMemoryRateLimiter(RateLimitConfig(requests=60, window_seconds=60))
 
@@ -31,7 +31,7 @@ RATE_LIMITER = InMemoryRateLimiter(RateLimitConfig(requests=60, window_seconds=6
 async def lifespan(app: FastAPI):
     del app
     global recognizer
-    recognizer = VoskRecognizer()
+    recognizer = create_recognizer()
     start_http_server(9101)
     yield
 
@@ -49,7 +49,7 @@ def recognise_audio(
     file: UploadFile = File(...),
     x_client_id: str | None = Header(default=None, alias="X-Client-Id"),
     _: Annotated[None, Depends(require_api_token)] = None,
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | float | None]:
     STT_REQUESTS_TOTAL.inc()
     if recognizer is None:
         raise HTTPException(status_code=503, detail="Recognizer not initialised")
@@ -78,7 +78,7 @@ def recognise_audio(
         if not result.success:
             STT_ERRORS_TOTAL.inc()
             raise HTTPException(status_code=400, detail=result.error or "STT failed")
-        return {"text": result.text, "success": True}
+        return {"text": result.text, "success": True, "confidence": result.confidence}
     except HTTPException:
         raise
     except Exception as exc:

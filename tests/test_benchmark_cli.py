@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.cli.benchmark import benchmark_phrase_set, load_phrase_cases, summarize_measurements
+from app.cli.benchmark import (
+    benchmark_phrase_set,
+    levenshtein_distance,
+    load_phrase_cases,
+    summarize_error_rates,
+    summarize_measurements,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -36,3 +42,21 @@ def test_benchmark_phrase_set_has_full_accuracy_on_control_data():
     assert report["cases_total"] >= 10
     assert report["accuracy_percent"] == 100.0
     assert report["mismatches"] == []
+
+
+def test_levenshtein_distance_words():
+    assert levenshtein_distance(["какая", "температура"], ["какая", "температура"]) == 0
+    assert levenshtein_distance(["какая", "температура"], ["какая", "давление"]) == 1
+
+
+def test_error_rate_summary():
+    summary = summarize_error_rates(
+        [
+            ("какая температура", "какая температура"),
+            ("включи свет", "включи свет"),
+            ("выключи свет", "включи"),
+        ]
+    )
+    assert summary["reference_words"] == 6
+    assert summary["word_edits"] == 2
+    assert summary["wer_percent"] == round(2 / 6 * 100, 3)

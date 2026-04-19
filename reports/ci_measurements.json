@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-04-19 01:19:29",
+  "phrase_set": {
+    "cases_total": 10,
+    "accuracy_percent": 100.0,
+    "summary": {
+      "count": 10,
+      "min_ms": 0.029,
+      "mean_ms": 1.085,
+      "p95_ms": 2.141,
+      "max_ms": 2.265,
+      "cpu_load_percent": 99.858,
+      "peak_memory_kib": 12.02
+    },
+    "mismatches": []
+  },
+  "synthetic_response_pipeline": {
+    "count": 30,
+    "min_ms": 0.005,
+    "mean_ms": 0.007,
+    "p95_ms": 0.007,
+    "max_ms": 0.025,
+    "cpu_load_percent": 98.443,
+    "peak_memory_kib": 1.02
+  },
+  "tts_runtime": {
+    "status": "skipped",
+    "reason": "Не найден RHVoice CLI (RHVoice-test/rhvoice.test) и не удалось инициализировать Windows SAPI голос. Установите RHVoice и укажите RHVOICE_BIN или RHVOICE_WINDOWS_VOICE."
+  },
+  "stt_runtime": {
+    "status": "not_requested"
+  }
+}
