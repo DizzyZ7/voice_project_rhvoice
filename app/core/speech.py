@@ -62,7 +62,7 @@ DEFAULT_STT_MIC_VAD_RMS_THRESHOLD = int(os.environ.get("STT_MIC_VAD_RMS_THRESHOL
 
 DEFAULT_RHVOICE_BIN = os.environ.get("RHVOICE_BIN")
 DEFAULT_WINDOWS_VOICE = os.environ.get("RHVOICE_WINDOWS_VOICE")
-DEFAULT_TTS_BACKEND = os.environ.get("TTS_BACKEND", "rhvoice")
+DEFAULT_TTS_BACKEND = os.environ.get("TTS_BACKEND", "auto")
 DEFAULT_PIPER_BIN = os.environ.get("PIPER_BIN")
 DEFAULT_PIPER_MODEL_PATH = os.environ.get("PIPER_MODEL_PATH") or os.environ.get("PIPER_MODEL")
 DEFAULT_PIPER_VOICE_MODELS = os.environ.get("PIPER_VOICE_MODELS", "{}")
