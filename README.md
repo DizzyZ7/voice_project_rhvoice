@@ -171,6 +171,10 @@ export ALERT_MAX_ESCALATION_LEVEL=2
 ## Ключевые переменные окружения
 
 - `STT_BACKEND`: `vosk` | `faster_whisper`
+- `STT_DENOISE_BACKEND`: `none` | `rnnoise` (опциональный шумодав перед STT)
+- `STT_DENOISE_FAIL_OPEN`: `1` | `0` (продолжать без шумодава при ошибке)
+- `STT_RNNOISE_LIB`: путь/имя RNNoise `.so` (опционально, если нужен не default)
+- `STT_RNNOISE_VOICE_PROB_THRESHOLD`: порог voice-prob RNNoise (опционально)
 - `TTS_BACKEND`: `auto` | `rhvoice` | `piper`
 - `VOSK_MODEL_PATH`: путь к модели Vosk
 - `FASTER_WHISPER_MODEL`, `FASTER_WHISPER_DEVICE`, `FASTER_WHISPER_COMPUTE_TYPE`
@@ -180,6 +184,12 @@ export ALERT_MAX_ESCALATION_LEVEL=2
 - `COMMAND_TRANSPORT`: `local` | `mqtt`
 - `INTEGRATION_MAP_PATH`, `INTEGRATION_DRY_RUN`, `INTEGRATION_STRICT`
 - `ORC_DB_PATH`, `ORC_IDEMPOTENCY_TTL_SECONDS`
+
+Для `STT_DENOISE_BACKEND=rnnoise` установите wrapper отдельно:
+
+```bash
+pip install git+https://github.com/dbklim/RNNoise_Wrapper.git
+```
 
 ## Alert Flow API
 

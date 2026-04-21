@@ -33,6 +33,11 @@ try:
 except ImportError:
     WhisperModel = None
 
+try:
+    from rnnoise_wrapper import RNNoise
+except ImportError:
+    RNNoise = None
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 LOG_DIR = BASE_DIR / "logs"
@@ -60,6 +65,9 @@ DEFAULT_FASTER_WHISPER_LANGUAGE = os.environ.get("FASTER_WHISPER_LANGUAGE", "ru"
 DEFAULT_FASTER_WHISPER_BEAM_SIZE = int(os.environ.get("FASTER_WHISPER_BEAM_SIZE", "1"))
 DEFAULT_FASTER_WHISPER_VAD_FILTER = os.environ.get("FASTER_WHISPER_VAD_FILTER", "1")
 DEFAULT_STT_MIC_VAD_RMS_THRESHOLD = int(os.environ.get("STT_MIC_VAD_RMS_THRESHOLD", "0"))
+DEFAULT_STT_DENOISE_BACKEND = os.environ.get("STT_DENOISE_BACKEND", "none")
+DEFAULT_STT_DENOISE_FAIL_OPEN = os.environ.get("STT_DENOISE_FAIL_OPEN", "1").strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_STT_RNNOISE_LIB = os.environ.get("STT_RNNOISE_LIB", "").strip()
 
 DEFAULT_RHVOICE_BIN = os.environ.get("RHVOICE_BIN")
 DEFAULT_WINDOWS_VOICE = os.environ.get("RHVOICE_WINDOWS_VOICE")
@@ -69,6 +77,23 @@ DEFAULT_PIPER_MODEL_PATH = os.environ.get("PIPER_MODEL_PATH") or os.environ.get(
 DEFAULT_PIPER_VOICE_MODELS = os.environ.get("PIPER_VOICE_MODELS", "{}")
 DEFAULT_TTS_CACHE_ENABLED = os.environ.get("TTS_CACHE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_TTS_CACHE_DIR = Path(os.environ.get("TTS_CACHE_DIR", str(BASE_DIR / "cache" / "tts"))).resolve()
+_RNNOISE_INSTANCE = None
+_RNNOISE_LOCK = threading.Lock()
+
+
+def _parse_optional_float(value: str) -> Optional[float]:
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD = _parse_optional_float(
+    os.environ.get("STT_RNNOISE_VOICE_PROB_THRESHOLD", "")
+)
 
 
 @dataclass
@@ -166,6 +191,10 @@ def _normalize_tts_backend_name(value: str) -> str:
     return value.strip().lower().replace("-", "_")
 
 
+def _normalize_denoise_backend_name(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
 def _normalize_text(value: str) -> str:
     return " ".join(value.strip().split()).lower()
 
@@ -237,6 +266,59 @@ class SpeechRecognizer:
         for (sample,) in struct.iter_unpack("<h", chunk[: sample_count * 2]):
             squared_total += float(sample * sample)
         return (squared_total / sample_count) ** 0.5
+
+    def _maybe_denoise_wav(self, wav_path: str) -> tuple[str, Optional[Path]]:
+        backend = _normalize_denoise_backend_name(DEFAULT_STT_DENOISE_BACKEND)
+        if backend != "rnnoise":
+            return wav_path, None
+        if RNNoise is None:
+            self.logger.warning("STT_DENOISE_BACKEND=rnnoise, но rnnoise_wrapper не установлен. Использую исходный WAV.")
+            return wav_path, None
+
+        denoiser = self._get_rnnoise_instance()
+        if denoiser is None:
+            if DEFAULT_STT_DENOISE_FAIL_OPEN:
+                return wav_path, None
+            raise RuntimeError("RNNoise инициализация не удалась, а STT_DENOISE_FAIL_OPEN=0")
+
+        temp_path: Optional[Path] = None
+        try:
+            audio = denoiser.read_wav(wav_path)
+            kwargs: dict[str, float] = {}
+            if DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD is not None:
+                kwargs["voice_prob_threshold"] = DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD
+            denoised_audio = denoiser.filter(audio, **kwargs)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                temp_path = Path(tmp.name)
+            denoiser.write_wav(str(temp_path), denoised_audio)
+            return str(temp_path), temp_path
+        except Exception as exc:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            if DEFAULT_STT_DENOISE_FAIL_OPEN:
+                self.logger.warning("RNNoise шумодав не применён, продолжаю без него: %s", exc)
+                return wav_path, None
+            raise RuntimeError(f"RNNoise шумодав не применён: {exc}") from exc
+
+    def _get_rnnoise_instance(self):
+        global _RNNOISE_INSTANCE
+        if _RNNOISE_INSTANCE is not None:
+            return _RNNOISE_INSTANCE
+        with _RNNOISE_LOCK:
+            if _RNNOISE_INSTANCE is not None:
+                return _RNNOISE_INSTANCE
+            try:
+                kwargs = {}
+                if DEFAULT_STT_RNNOISE_LIB:
+                    kwargs["f_name_lib"] = DEFAULT_STT_RNNOISE_LIB
+                _RNNOISE_INSTANCE = RNNoise(**kwargs)
+                return _RNNOISE_INSTANCE
+            except Exception as exc:
+                self.logger.warning("RNNoise init failed: %s", exc)
+                return None
 
 
 class SpeechSynthesizer:
@@ -847,29 +929,36 @@ class VoskRecognizer(SpeechRecognizer):
         self.model = vosk.Model(model_path)
 
     def transcribe_from_wav(self, wav_path: str) -> STTResult:
+        processed_wav, temp_denoised_path = self._maybe_denoise_wav(wav_path)
         try:
-            wf = wave.open(wav_path, "rb")
+            wf = wave.open(processed_wav, "rb")
         except FileNotFoundError:
-            return STTResult(text="", success=False, error=f"Файл не найден: {wav_path}")
+            return STTResult(text="", success=False, error=f"Файл не найден: {processed_wav}")
         except wave.Error as exc:
             return STTResult(text="", success=False, error=str(exc))
 
-        if wf.getnchannels() != 1 or wf.getframerate() != 16000:
-            wf.close()
-            return STTResult(text="", success=False, error="WAV должен быть mono 16kHz")
+        try:
+            if wf.getnchannels() != 1 or wf.getframerate() != 16000:
+                return STTResult(text="", success=False, error="WAV должен быть mono 16kHz")
 
-        recognizer = vosk.KaldiRecognizer(self.model, wf.getframerate())
-        chunks: list[str] = []
-        while True:
-            data = wf.readframes(4000)
-            if not data:
-                break
-            if recognizer.AcceptWaveform(data):
-                chunks.append(recognizer.Result())
-        chunks.append(recognizer.FinalResult())
-        wf.close()
-        text, confidence = self._extract_text_and_confidence(chunks)
-        return STTResult(text=text, success=True, confidence=confidence)
+            recognizer = vosk.KaldiRecognizer(self.model, wf.getframerate())
+            chunks: list[str] = []
+            while True:
+                data = wf.readframes(4000)
+                if not data:
+                    break
+                if recognizer.AcceptWaveform(data):
+                    chunks.append(recognizer.Result())
+            chunks.append(recognizer.FinalResult())
+            text, confidence = self._extract_text_and_confidence(chunks)
+            return STTResult(text=text, success=True, confidence=confidence)
+        finally:
+            wf.close()
+            if temp_denoised_path is not None:
+                try:
+                    temp_denoised_path.unlink()
+                except Exception:
+                    pass
 
     def transcribe_from_microphone(self, timeout: int = 5) -> STTResult:
         if sd is None:
@@ -945,9 +1034,10 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         self.model = WhisperModel(model_ref, device=device, compute_type=compute_type)
 
     def transcribe_from_wav(self, wav_path: str) -> STTResult:
-        wav_file = Path(wav_path)
+        processed_wav, temp_denoised_path = self._maybe_denoise_wav(wav_path)
+        wav_file = Path(processed_wav)
         if not wav_file.exists():
-            return STTResult(text="", success=False, error=f"Файл не найден: {wav_path}")
+            return STTResult(text="", success=False, error=f"Файл не найден: {processed_wav}")
 
         try:
             segments, info = self.model.transcribe(
@@ -967,6 +1057,12 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         except Exception as exc:
             self.logger.exception("Ошибка faster-whisper STT")
             return STTResult(text="", success=False, error=str(exc))
+        finally:
+            if temp_denoised_path is not None:
+                try:
+                    temp_denoised_path.unlink()
+                except Exception:
+                    pass
 
     def transcribe_from_microphone(self, timeout: int = 5) -> STTResult:
         chunks, error = self._capture_microphone_chunks(timeout=timeout, logger=self.logger)
