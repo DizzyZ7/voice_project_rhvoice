@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-04-21 03:20:02",
+  "phrase_set": {
+    "cases_total": 34,
+    "accuracy_percent": 100.0,
+    "summary": {
+      "count": 34,
+      "min_ms": 0.053,
+      "mean_ms": 14.892,
+      "p95_ms": 44.231,
+      "max_ms": 53.4,
+      "cpu_load_percent": 95.619,
+      "peak_memory_kib": 37.859
+    },
+    "mismatches": []
+  },
+  "synthetic_response_pipeline": {
+    "count": 200,
+    "min_ms": 0.017,
+    "mean_ms": 0.026,
+    "p95_ms": 0.057,
+    "max_ms": 0.168,
+    "cpu_load_percent": 283.339,
+    "peak_memory_kib": 6.164
+  },
+  "tts_runtime": {
+    "status": "ok",
+    "backend": "cached",
+    "messages_total": 4,
+    "summary": {
+      "count": 4,
+      "min_ms": 1450.947,
+      "mean_ms": 1518.309,
+      "p95_ms": 1568.216,
+      "max_ms": 1570.477,
+      "cpu_load_percent": 3.601,
+      "peak_memory_kib": 59.15
+    },
+    "generated_files": [
+      "reports\\tts\\tts_case_1.wav",
+      "reports\\tts\\tts_case_2.wav",
+      "reports\\tts\\tts_case_3.wav",
+      "reports\\tts\\tts_case_4.wav"
+    ]
+  },
+  "stt_runtime": {
+    "status": "not_requested"
+  }
+}

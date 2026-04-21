@@ -21,7 +21,10 @@ Write-Host "TTS demo traffic..."
     save_to_file = "demo/tts_$_.wav"
     use_cache = $false
   } | ConvertTo-Json
-  Invoke-RestMethod -Method Post -Uri $ttsUrl -Headers $authHeaders -ContentType "application/json" -Body $body | Out-Null
+  curl.exe --noproxy "*" -s -X POST "$ttsUrl" `
+    -H "Authorization: Bearer $token" `
+    -H "Content-Type: application/json" `
+    --data-raw "$body" | Out-Null
   Start-Sleep -Milliseconds 200
 }
 
@@ -43,12 +46,11 @@ Write-Host "Orchestrator demo traffic..."
 
 Write-Host "Injecting small error burst for Errors/min panel..."
 1..3 | ForEach-Object {
-  try {
-    $bad = @{ text = "" } | ConvertTo-Json
-    Invoke-RestMethod -Method Post -Uri $ttsUrl -Headers $authHeaders -ContentType "application/json" -Body $bad | Out-Null
-  } catch {
-    # expected validation error
-  }
+  $bad = @{ text = "" } | ConvertTo-Json
+  curl.exe --noproxy "*" -s -X POST "$ttsUrl" `
+    -H "Authorization: Bearer $token" `
+    -H "Content-Type: application/json" `
+    --data-raw "$bad" | Out-Null
 }
 
 Write-Host "Done. In Grafana set range to Last 15 minutes and click Refresh."

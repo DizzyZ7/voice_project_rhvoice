@@ -249,7 +249,7 @@ $env:VOICE_API_TOKEN="change-me-in-prod"
 - Пароль: `admin` (если попросит сменить, задайте новый)
 - В дашборде выставить `Last 15 minutes` и нажать `Refresh`.
 
-## 9) Что показать в презентации
+## 9) Надо показать в презентации
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -vv -rA --color=yes

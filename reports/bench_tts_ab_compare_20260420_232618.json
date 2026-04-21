@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-04-20 23:26:45",
+  "texts_file": "benchmarks/tts_messages_ab.txt",
+  "messages_total": 12,
+  "rhvoice": {
+    "report": "reports/bench_tts_ab_rhvoice_20260420_232618.json",
+    "mean_ms": 883.161,
+    "audio_dir": "reports/tts_ab_rhvoice_20260420_232618",
+    "p95_ms": 968.548
+  },
+  "piper": {
+    "report": "reports/bench_tts_ab_piper_20260420_232618.json",
+    "mean_ms": 1023.232,
+    "audio_dir": "reports/tts_ab_piper_20260420_232618",
+    "p95_ms": 1180.655
+  },
+  "ratio_rhvoice_to_piper": 0.863,
+  "faster_backend": "RHVoice/SAPI"
+}
