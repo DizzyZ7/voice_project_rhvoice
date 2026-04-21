@@ -203,6 +203,23 @@ $env:STT_RNNOISE_LIB="C:\path\to\third_party\rnnoise-windows\x64\Release\rnnoise
 pip install git+https://github.com/dbklim/RNNoise_Wrapper.git
 ```
 
+Для Raspberry Pi/Linux в проект также добавлен локальный fallback:
+`third_party/RNNoise_Wrapper/rnnoise_wrapper/libs/librnnoise_default.so.0.4.1`.
+То есть при `STT_DENOISE_BACKEND=rnnoise` сервис может работать и без отдельного `pip install`,
+если зависимости `numpy` и `pydub` доступны в окружении.
+
+Быстрая проверка на Linux/Raspberry Pi:
+
+```bash
+export STT_DENOISE_BACKEND=rnnoise
+export STT_DENOISE_FAIL_OPEN=0
+export STT_RNNOISE_LIB="$(pwd)/third_party/RNNoise_Wrapper/rnnoise_wrapper/libs/librnnoise_default.so.0.4.1"
+python -m uvicorn stt_service:app --host 127.0.0.1 --port 8000
+curl -s -X POST "http://127.0.0.1:8000/stt/recognize" \
+  -H "Authorization: Bearer change-me-in-prod" \
+  -F "file=@voice_test.wav;type=audio/wav"
+```
+
 ## Alert Flow API
 
 - `POST /alerts/raise` – создать тревогу (поддерживает `Idempotency-Key`)

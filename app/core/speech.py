@@ -4,6 +4,7 @@ import base64
 import ctypes
 import contextlib
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ import queue
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -97,6 +99,21 @@ def _parse_optional_float(value: str) -> Optional[float]:
 DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD = _parse_optional_float(
     os.environ.get("STT_RNNOISE_VOICE_PROB_THRESHOLD", "")
 )
+
+
+def _load_rnnoise_py_wrapper_class():
+    if RNNoisePyWrapper is not None:
+        return RNNoisePyWrapper
+    vendored_root = BASE_DIR / "third_party" / "RNNoise_Wrapper"
+    if vendored_root.exists():
+        vendored_path = str(vendored_root.resolve())
+        if vendored_path not in sys.path:
+            sys.path.insert(0, vendored_path)
+    try:
+        mod = importlib.import_module("rnnoise_wrapper")
+        return getattr(mod, "RNNoise", None)
+    except Exception:
+        return None
 
 
 @dataclass
@@ -490,14 +507,15 @@ class SpeechRecognizer:
         with _RNNOISE_LOCK:
             if _RNNOISE_INSTANCE is not None:
                 return _RNNOISE_INSTANCE
-            if RNNoisePyWrapper is None:
+            rnnoise_cls = _load_rnnoise_py_wrapper_class()
+            if rnnoise_cls is None:
                 self.logger.warning("rnnoise_wrapper не установлен. На Windows используйте rnnoise DLL через STT_RNNOISE_LIB.")
                 return None
             try:
                 kwargs = {}
                 if DEFAULT_STT_RNNOISE_LIB:
                     kwargs["f_name_lib"] = DEFAULT_STT_RNNOISE_LIB
-                _RNNOISE_INSTANCE = RNNoisePyWrapper(**kwargs)
+                _RNNOISE_INSTANCE = rnnoise_cls(**kwargs)
                 return _RNNOISE_INSTANCE
             except Exception as exc:
                 self.logger.warning("RNNoise init failed: %s", exc)
