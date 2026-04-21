@@ -173,7 +173,7 @@ export ALERT_MAX_ESCALATION_LEVEL=2
 - `STT_BACKEND`: `vosk` | `faster_whisper`
 - `STT_DENOISE_BACKEND`: `none` | `rnnoise` (опциональный шумодав перед STT)
 - `STT_DENOISE_FAIL_OPEN`: `1` | `0` (продолжать без шумодава при ошибке)
-- `STT_RNNOISE_LIB`: путь/имя RNNoise `.so` (опционально, если нужен не default)
+- `STT_RNNOISE_LIB`: путь к RNNoise библиотеке (`.dll` на Windows, `.so` на Linux)
 - `STT_RNNOISE_VOICE_PROB_THRESHOLD`: порог voice-prob RNNoise (опционально)
 - `TTS_BACKEND`: `auto` | `rhvoice` | `piper`
 - `VOSK_MODEL_PATH`: путь к модели Vosk
@@ -185,7 +185,19 @@ export ALERT_MAX_ESCALATION_LEVEL=2
 - `INTEGRATION_MAP_PATH`, `INTEGRATION_DRY_RUN`, `INTEGRATION_STRICT`
 - `ORC_DB_PATH`, `ORC_IDEMPOTENCY_TTL_SECONDS`
 
-Для `STT_DENOISE_BACKEND=rnnoise` установите wrapper отдельно:
+Для Windows в проект добавлен исходник `third_party/rnnoise-windows`. Сборка:
+
+```powershell
+.\scripts\build_rnnoise_windows.ps1
+```
+
+После сборки укажите:
+
+```powershell
+$env:STT_RNNOISE_LIB="C:\path\to\third_party\rnnoise-windows\x64\Release\rnnoise_share.dll"
+```
+
+Для Linux можно использовать Python wrapper:
 
 ```bash
 pip install git+https://github.com/dbklim/RNNoise_Wrapper.git

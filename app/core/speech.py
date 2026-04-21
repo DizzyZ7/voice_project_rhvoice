@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import contextlib
 import hashlib
 import json
@@ -34,9 +35,9 @@ except ImportError:
     WhisperModel = None
 
 try:
-    from rnnoise_wrapper import RNNoise
+    from rnnoise_wrapper import RNNoise as RNNoisePyWrapper
 except ImportError:
-    RNNoise = None
+    RNNoisePyWrapper = None
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -79,6 +80,8 @@ DEFAULT_TTS_CACHE_ENABLED = os.environ.get("TTS_CACHE_ENABLED", "1").strip().low
 DEFAULT_TTS_CACHE_DIR = Path(os.environ.get("TTS_CACHE_DIR", str(BASE_DIR / "cache" / "tts"))).resolve()
 _RNNOISE_INSTANCE = None
 _RNNOISE_LOCK = threading.Lock()
+_RNNOISE_DLL = None
+_RNNOISE_DLL_PATH = None
 
 
 def _parse_optional_float(value: str) -> Optional[float]:
@@ -199,6 +202,144 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.strip().split()).lower()
 
 
+def _discover_windows_rnnoise_lib() -> Optional[str]:
+    if DEFAULT_STT_RNNOISE_LIB and Path(DEFAULT_STT_RNNOISE_LIB).exists():
+        return str(Path(DEFAULT_STT_RNNOISE_LIB).resolve())
+
+    base = BASE_DIR / "third_party" / "rnnoise-windows"
+    candidates = [
+        base / "x64" / "Release" / "rnnoise_share.dll",
+        base / "x64" / "Debug" / "rnnoise_share.dll",
+        base / "Release" / "rnnoise_share.dll",
+        base / "Debug" / "rnnoise_share.dll",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    if base.exists():
+        for dll in base.rglob("rnnoise*.dll"):
+            return str(dll.resolve())
+    return None
+
+
+def _load_windows_rnnoise_dll(logger: logging.Logger):
+    global _RNNOISE_DLL, _RNNOISE_DLL_PATH
+    if _RNNOISE_DLL is not None:
+        return _RNNOISE_DLL
+
+    dll_path = _discover_windows_rnnoise_lib()
+    if not dll_path:
+        logger.warning("RNNoise DLL не найдена. Укажите STT_RNNOISE_LIB или соберите rnnoise_share.dll в third_party/rnnoise-windows.")
+        return None
+
+    with _RNNOISE_LOCK:
+        if _RNNOISE_DLL is not None:
+            return _RNNOISE_DLL
+        try:
+            lib = ctypes.CDLL(dll_path)
+            lib.rnnoise_create.argtypes = [ctypes.c_void_p]
+            lib.rnnoise_create.restype = ctypes.c_void_p
+            lib.rnnoise_destroy.argtypes = [ctypes.c_void_p]
+            lib.rnnoise_destroy.restype = None
+            lib.rnnoise_process_frame.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_float),
+                ctypes.POINTER(ctypes.c_float),
+            ]
+            lib.rnnoise_process_frame.restype = ctypes.c_float
+            _RNNOISE_DLL = lib
+            _RNNOISE_DLL_PATH = dll_path
+            logger.info("RNNoise DLL loaded: %s", dll_path)
+            return _RNNOISE_DLL
+        except Exception as exc:
+            logger.warning("Не удалось загрузить RNNoise DLL (%s): %s", dll_path, exc)
+            return None
+
+
+def _denoise_pcm16_with_rnnoise_dll(pcm_bytes: bytes, sample_rate: int, logger: logging.Logger) -> bytes:
+    if not pcm_bytes:
+        return pcm_bytes
+    lib = _load_windows_rnnoise_dll(logger)
+    if lib is None:
+        raise RuntimeError("RNNoise DLL is not available")
+
+    working_bytes = _resample_pcm16_mono(pcm_bytes, sample_rate, 48000) if sample_rate != 48000 else pcm_bytes
+
+    if len(working_bytes) % 2:
+        working_bytes += b"\x00"
+
+    sample_count = len(working_bytes) // 2
+    frame_size = 480
+    total_frames = (sample_count + frame_size - 1) // frame_size
+    padded_sample_count = total_frames * frame_size
+    if padded_sample_count > sample_count:
+        working_bytes += b"\x00" * ((padded_sample_count - sample_count) * 2)
+
+    samples = struct.unpack("<" + "h" * padded_sample_count, working_bytes)
+    in_frame = (ctypes.c_float * frame_size)()
+    out_frame = (ctypes.c_float * frame_size)()
+    output_samples: list[int] = []
+    state = lib.rnnoise_create(None)
+    if not state:
+        raise RuntimeError("rnnoise_create returned NULL")
+    try:
+        for frame_idx in range(total_frames):
+            base = frame_idx * frame_size
+            for i in range(frame_size):
+                in_frame[i] = float(samples[base + i])
+            lib.rnnoise_process_frame(state, out_frame, in_frame)
+            for i in range(frame_size):
+                value = int(round(out_frame[i]))
+                if value > 32767:
+                    value = 32767
+                elif value < -32768:
+                    value = -32768
+                output_samples.append(value)
+    finally:
+        lib.rnnoise_destroy(state)
+
+    denoised_bytes = struct.pack("<" + "h" * len(output_samples), *output_samples)
+    denoised_bytes = denoised_bytes[: sample_count * 2]
+    if sample_rate != 48000:
+        denoised_bytes = _resample_pcm16_mono(denoised_bytes, 48000, sample_rate)
+    return denoised_bytes
+
+
+def _resample_pcm16_mono(pcm_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
+    if src_rate <= 0 or dst_rate <= 0:
+        raise ValueError("Invalid sample rate")
+    if src_rate == dst_rate or not pcm_bytes:
+        return pcm_bytes
+    if len(pcm_bytes) % 2:
+        pcm_bytes += b"\x00"
+    src_count = len(pcm_bytes) // 2
+    if src_count == 0:
+        return b""
+
+    src_samples = struct.unpack("<" + "h" * src_count, pcm_bytes)
+    dst_count = max(1, int(round(src_count * dst_rate / src_rate)))
+    ratio = src_rate / dst_rate
+    out: list[int] = []
+    max_index = src_count - 1
+    for i in range(dst_count):
+        pos = i * ratio
+        i0 = int(pos)
+        if i0 >= max_index:
+            value = src_samples[max_index]
+        else:
+            frac = pos - i0
+            v0 = src_samples[i0]
+            v1 = src_samples[i0 + 1]
+            value = int(round(v0 + (v1 - v0) * frac))
+        if value > 32767:
+            value = 32767
+        elif value < -32768:
+            value = -32768
+        out.append(value)
+    return struct.pack("<" + "h" * len(out), *out)
+
+
 class SpeechRecognizer:
     backend_name = "unknown"
 
@@ -271,26 +412,65 @@ class SpeechRecognizer:
         backend = _normalize_denoise_backend_name(DEFAULT_STT_DENOISE_BACKEND)
         if backend != "rnnoise":
             return wav_path, None
-        if RNNoise is None:
-            self.logger.warning("STT_DENOISE_BACKEND=rnnoise, но rnnoise_wrapper не установлен. Использую исходный WAV.")
-            return wav_path, None
-
-        denoiser = self._get_rnnoise_instance()
-        if denoiser is None:
-            if DEFAULT_STT_DENOISE_FAIL_OPEN:
-                return wav_path, None
-            raise RuntimeError("RNNoise инициализация не удалась, а STT_DENOISE_FAIL_OPEN=0")
 
         temp_path: Optional[Path] = None
         try:
-            audio = denoiser.read_wav(wav_path)
-            kwargs: dict[str, float] = {}
-            if DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD is not None:
-                kwargs["voice_prob_threshold"] = DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD
-            denoised_audio = denoiser.filter(audio, **kwargs)
+            with wave.open(wav_path, "rb") as wf:
+                channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                sample_rate = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+            if channels != 1 or sample_width != 2:
+                self.logger.warning(
+                    "RNNoise ожидает mono PCM16. Получено channels=%s sample_width=%s, пропускаю шумодав.",
+                    channels,
+                    sample_width,
+                )
+                return wav_path, None
+
+            if os.name == "nt":
+                denoised_frames = _denoise_pcm16_with_rnnoise_dll(frames, sample_rate, self.logger)
+            else:
+                denoiser = self._get_rnnoise_wrapper_instance()
+                if denoiser is None:
+                    raise RuntimeError("rnnoise_wrapper is not available")
+                kwargs: dict[str, float] = {}
+                if DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD is not None:
+                    kwargs["voice_prob_threshold"] = DEFAULT_STT_RNNOISE_VOICE_PROB_THRESHOLD
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as in_tmp:
+                    in_tmp_path = Path(in_tmp.name)
+                try:
+                    with wave.open(str(in_tmp_path), "wb") as in_wf:
+                        in_wf.setnchannels(1)
+                        in_wf.setsampwidth(2)
+                        in_wf.setframerate(sample_rate)
+                        in_wf.writeframes(frames)
+                    audio = denoiser.read_wav(str(in_tmp_path))
+                    denoised_audio = denoiser.filter(audio, **kwargs)
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out_tmp:
+                        out_tmp_path = Path(out_tmp.name)
+                    try:
+                        denoiser.write_wav(str(out_tmp_path), denoised_audio)
+                        with wave.open(str(out_tmp_path), "rb") as out_wf:
+                            denoised_frames = out_wf.readframes(out_wf.getnframes())
+                    finally:
+                        try:
+                            out_tmp_path.unlink()
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        in_tmp_path.unlink()
+                    except Exception:
+                        pass
+
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 temp_path = Path(tmp.name)
-            denoiser.write_wav(str(temp_path), denoised_audio)
+            with wave.open(str(temp_path), "wb") as out_wf:
+                out_wf.setnchannels(1)
+                out_wf.setsampwidth(2)
+                out_wf.setframerate(sample_rate)
+                out_wf.writeframes(denoised_frames)
             return str(temp_path), temp_path
         except Exception as exc:
             if temp_path is not None:
@@ -303,18 +483,21 @@ class SpeechRecognizer:
                 return wav_path, None
             raise RuntimeError(f"RNNoise шумодав не применён: {exc}") from exc
 
-    def _get_rnnoise_instance(self):
+    def _get_rnnoise_wrapper_instance(self):
         global _RNNOISE_INSTANCE
         if _RNNOISE_INSTANCE is not None:
             return _RNNOISE_INSTANCE
         with _RNNOISE_LOCK:
             if _RNNOISE_INSTANCE is not None:
                 return _RNNOISE_INSTANCE
+            if RNNoisePyWrapper is None:
+                self.logger.warning("rnnoise_wrapper не установлен. На Windows используйте rnnoise DLL через STT_RNNOISE_LIB.")
+                return None
             try:
                 kwargs = {}
                 if DEFAULT_STT_RNNOISE_LIB:
                     kwargs["f_name_lib"] = DEFAULT_STT_RNNOISE_LIB
-                _RNNOISE_INSTANCE = RNNoise(**kwargs)
+                _RNNOISE_INSTANCE = RNNoisePyWrapper(**kwargs)
                 return _RNNOISE_INSTANCE
             except Exception as exc:
                 self.logger.warning("RNNoise init failed: %s", exc)
