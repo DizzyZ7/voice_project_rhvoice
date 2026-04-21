@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -130,6 +131,16 @@ def _rms_int16(pcm_bytes: bytes) -> float:
         value = int.from_bytes(pcm_bytes[offset : offset + 2], byteorder="little", signed=True)
         squared_total += float(value * value)
     return (squared_total / sample_count) ** 0.5
+
+
+def _ensure_nonempty_wav(path: Path) -> None:
+    if not path.exists():
+        raise RuntimeError(f"WAV не создан: {path}")
+    if path.stat().st_size <= 44:
+        raise RuntimeError(f"WAV пустой или повреждён (слишком маленький): {path}")
+    with contextlib.closing(wave.open(str(path), "rb")) as wf:
+        if wf.getnframes() <= 0:
+            raise RuntimeError(f"WAV не содержит аудиофреймов: {path}")
 
 
 def setup_logger(name: str, log_file: str) -> logging.Logger:
@@ -460,7 +471,10 @@ class RHVoiceTTS(SpeechSynthesizer):
         try:
             self.synthesize_to_wav(text, wav_path, speed=speed, pitch=pitch, voice=voice, use_cache=use_cache)
             if aplay:
-                subprocess.run([aplay, str(wav_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    subprocess.run([aplay, str(wav_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except subprocess.CalledProcessError:
+                    self.logger.warning("aplay завершился с ошибкой, WAV уже сохранён: %s", wav_path)
             else:
                 self.logger.warning("aplay не найден, WAV сохранен во временный файл: %s", wav_path)
         finally:
@@ -498,9 +512,11 @@ class RHVoiceTTS(SpeechSynthesizer):
 
         if self.backend == "windows_sapi":
             self._sapi_speak(text, output_path=output, speed=speed, pitch=pitch, voice=voice)
+            _ensure_nonempty_wav(output)
             self.logger.info("Windows SAPI сохранил WAV: %s", output)
         else:
             self._synthesize_cli_to_wav(text=text, output=output, speed=speed, pitch=pitch, voice=voice)
+            _ensure_nonempty_wav(output)
             self.logger.info("RHVoice сохранил WAV: %s", output)
 
         if cache_path and output.exists():
@@ -658,7 +674,10 @@ class PiperTTS(SpeechSynthesizer):
             self.synthesize_to_wav(text, wav_path, speed=speed, pitch=pitch, voice=voice, use_cache=use_cache)
             aplay = shutil.which("aplay")
             if aplay:
-                subprocess.run([aplay, str(wav_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    subprocess.run([aplay, str(wav_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except subprocess.CalledProcessError:
+                    self.logger.warning("aplay завершился с ошибкой, WAV уже сохранён: %s", wav_path)
             else:
                 self.logger.warning("aplay не найден, WAV сохранен во временный файл: %s", wav_path)
         finally:
@@ -696,6 +715,7 @@ class PiperTTS(SpeechSynthesizer):
                 return output
 
         self._run_piper(text=text, output=output, model_path=model_path, speed=speed, pitch=pitch)
+        _ensure_nonempty_wav(output)
         self.logger.info("Piper сохранил WAV: %s", output)
 
         if cache_path and output.exists():
@@ -781,7 +801,10 @@ class CachedTTSEngine(SpeechSynthesizer):
         cached_path = self._ensure_cached(text, speed=speed, pitch=pitch, voice=voice)
         aplay = shutil.which("aplay")
         if aplay:
-            subprocess.run([aplay, str(cached_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                subprocess.run([aplay, str(cached_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError:
+                self.logger.warning("aplay завершился с ошибкой, WAV в кэше доступен: %s", cached_path)
         else:
             self.logger.warning("Аудиоплеер не найден, WAV сохранен: %s", cached_path)
 

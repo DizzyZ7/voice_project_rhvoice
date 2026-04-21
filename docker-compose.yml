@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Compose file to run the voice command system as a set of
 # independent microservices.  This configuration starts
 # three Python services (STT, TTS and orchestrator), a Mosquitto
